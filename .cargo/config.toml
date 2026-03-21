@@ -1,0 +1,5 @@
+# Optional optimization for Windows MSVC with lld:
+# If you have llvm-lld installed on Windows, you can uncomment the following lines to speed up linking.
+# [target.x86_64-pc-windows-msvc]
+# linker = "link.exe"
+# rustflags = ["-C", "link-arg=-fuse-ld=lld"]
