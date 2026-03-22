@@ -1,4 +1,3 @@
-// early models stub
 #[derive(serde::Serialize, serde::Deserialize, Clone)]
 pub struct SearchResult {
     pub file_path: String,

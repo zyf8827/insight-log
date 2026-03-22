@@ -1,15 +1,20 @@
 import { useState } from "react";
 import "./App.css";
+import { SearchForm } from "./SearchForm";
+import { OldFileList } from "./OldFileList";
+import { LogViewer } from "./LogViewer";
 
 function App() {
-  const [dir, setDir] = useState<string>("");
+  const [query, setQuery] = useState("");
+  const [files] = useState<string[]>(["app.log", "error.log"]);
   return (
     <div className="layout-wide-tree">
-      <aside className="file-pane">Files (placeholder)</aside>
+      <aside className="file-pane">
+        <OldFileList files={files} />
+      </aside>
       <main>
-        <h1>Insight Log</h1>
-        <p>Directory: {dir || "(none)"}</p>
-        <button type="button" onClick={() => setDir("/tmp/logs")}>Pick dir</button>
+        <SearchForm onSearch={setQuery} />
+        <LogViewer query={query} />
       </main>
     </div>
   );
