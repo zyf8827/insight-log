@@ -1,1 +1,2 @@
-Local notes — do not ship.
+Trying zip/tar/gz sniffing.
+Will unify archive module.

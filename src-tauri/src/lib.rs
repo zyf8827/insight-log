@@ -1,4 +1,4 @@
-// commands wiring v1
+// + archive commands
 mod models;
 mod search;
 mod archive;
@@ -79,3 +79,83 @@ async fn get_directory_structure(
             let mut children = Vec::new();
             let entries = fs::read_dir(entry_path)?;
             
+            for entry in entries {
+                let entry = entry?;
+                let child_path = entry.path();
+                if let Ok(child_node) = build_tree_node(&child_path) {
+                    children.push(child_node);
+                }
+            }
+            
+            // 按类型和名称排序：先目录后文件，按字母顺序
+            children.sort_by(|a, b| {
+                match (a.r#type.as_str(), b.r#type.as_str()) {
+                    ("directory", "file") => std::cmp::Ordering::Less,
+                    ("file", "directory") => std::cmp::Ordering::Greater,
+                    _ => a.title.cmp(&b.title),
+                }
+            });
+            
+            Ok(TreeNode {
+                key: entry_path.to_string_lossy().to_string(),
+                title: file_name,
+                is_leaf: false,
+                children: Some(children),
+                r#type: "directory".to_string(),
+            })
+        } else {
+            Ok(TreeNode {
+                key: entry_path.to_string_lossy().to_string(),
+                title: file_name,
+                is_leaf: true,
+                children: None,
+                r#type: "file".to_string(),
+            })
+        }
+    }
+
+    let mut result = Vec::new();
+    let entries = fs::read_dir(path)
+        .map_err(|e| format!("读取目录失败: {}", e))?;
+    
+    for entry in entries {
+        let entry = entry.map_err(|e| format!("读取目录条目失败: {}", e))?;
+        let entry_path = entry.path();
+        
+        if let Ok(node) = build_tree_node(&entry_path) {
+            result.push(node);
+        }
+    }
+    
+    result.sort_by(|a, b| {
+        match (a.r#type.as_str(), b.r#type.as_str()) {
+            ("directory", "file") => std::cmp::Ordering::Less,
+            ("file", "directory") => std::cmp::Ordering::Greater,
+            _ => a.title.cmp(&b.title),
+        }
+    });
+
+    Ok(result)
+}
+
+// 定义树节点结构
+#[derive(serde::Serialize)]
+struct TreeNode {
+    key: String,
+    title: String,
+    #[serde(rename = "isLeaf")]
+    is_leaf: bool,
+    children: Option<Vec<TreeNode>>,
+    #[serde(rename = "type")]
+    r#type: String,
+}
+
+/// 获取文件信息（带路径沙箱校验）
+#[tauri::command]
+async fn get_file_info(
+    file_path: String,
+    state: tauri::State<'_, AppState>,
+) -> Result<FileInfo, String> {
+    use std::fs;
+    
+    let path_to_check = if let Some((archive_path, _)) = file_ops::parse_virtual_archive_path(&file_path) {

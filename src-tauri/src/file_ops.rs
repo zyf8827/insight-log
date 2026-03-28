@@ -1,4 +1,3 @@
-// file ops v1
 use crate::archive;
 use crate::models::SearchResult;
 use memmap2::Mmap;
@@ -99,3 +98,83 @@ pub fn search_in_archive(
                     .map(|s| s.to_string())
                     .collect();
 
+                results.push(SearchResult {
+                    file_path: virtual_file_path.clone(),
+                    line_number: line_num + 1,
+                    content: line.to_string(),
+                    context,
+                    matched_positions,
+                });
+            }
+        }
+    }
+
+    Ok(results)
+}
+
+/// 根据 glob 模式过滤文件
+pub fn matches_patterns(file_path: &Path, includes: &[String], excludes: &[String]) -> bool {
+    let path_str = file_path.display().to_string();
+
+    // 首先检查排除模式
+    for pattern in excludes {
+        if !pattern.trim().is_empty() {
+            if glob::Pattern::new(pattern).map_or(false, |p| p.matches(&path_str)) {
+                return false;
+            }
+        }
+    }
+
+    // 若无包含模式，默认包含所有未被排除的文件
+    let active_includes: Vec<&String> = includes.iter().filter(|s| !s.trim().is_empty()).collect();
+    if active_includes.is_empty() {
+        return true;
+    }
+
+    // 检查是否匹配任一包含模式
+    for pattern in active_includes {
+        if glob::Pattern::new(pattern).map_or(false, |p| p.matches(&path_str)) {
+            return true;
+        }
+    }
+
+    false
+}
+
+pub fn parse_virtual_archive_path(file_path: &str) -> Option<(PathBuf, String)> {
+    const DELIMITER: &str = "→";
+    if !file_path.contains(DELIMITER) {
+        return None;
+    }
+
+    let mut parts = file_path.splitn(2, DELIMITER);
+    let archive_part = parts.next()?.trim().to_string();
+    let inner_part = parts.next()?.trim().to_string();
+
+    if archive_part.is_empty() || inner_part.is_empty() {
+        return None;
+    }
+
+    Some((PathBuf::from(archive_part), inner_part))
+}
+
+pub fn normalize_inner_path(path: &str) -> String {
+    let replaced = path.replace('\\', "/");
+    let trimmed = replaced.trim_start_matches("./");
+    trimmed.trim_start_matches('/').to_string()
+}
+
+/// 校验归档内部路径，拒绝绝对路径或尝试 `..` 越界的恶意条目
+pub fn validate_inner_path(inner_path: &str) -> Result<String, String> {
+    let normalized = normalize_inner_path(inner_path);
+    if normalized.contains("../") || normalized.contains("/..") || normalized == ".." {
+        return Err("非法内部路径：禁止包含路径穿越片段 '..'".to_string());
+    }
+    if normalized.starts_with('/') || normalized.starts_with('\\') {
+        return Err("非法内部路径：禁止使用根绝对路径".to_string());
+    }
+    Ok(normalized)
+}
+
+pub fn read_plain_file_lines(path: &Path) -> Result<Vec<String>, String> {
+    let file = File::open(path).map_err(|e| format!("打开文件失败: {}", e))?;

@@ -1,4 +1,3 @@
-// text search v1 (no archives yet)
 use crate::models::{SearchResult, MergedSearchResult, LineResult};
 use regex::{Regex, RegexBuilder};
 use std::collections::HashMap;
@@ -119,3 +118,83 @@ fn create_merged_result(results: Vec<SearchResult>, context_lines: usize) -> Mer
                         },
                     },
                 );
+            } else {
+                // 行已存在，更新匹配属性
+                let line = lines_map.get_mut(&actual_line_num).unwrap();
+                if is_match_line {
+                    line.is_match = true;
+                    let mut ranges = line.match_ranges.take().unwrap_or_default();
+                    ranges.extend(result.matched_positions.clone());
+                    ranges.sort_unstable();
+                    ranges.dedup();
+                    line.match_ranges = Some(ranges);
+                }
+            }
+        }
+    }
+
+    if min_line == std::usize::MAX {
+        min_line = results[0].line_number;
+        max_line = results[0].line_number;
+    }
+
+    // 转换为排序向量
+    let mut lines: Vec<LineResult> = lines_map.into_values().collect();
+    lines.sort_by(|a, b| a.line_number.cmp(&b.line_number));
+
+    MergedSearchResult {
+        file_path: results[0].file_path.clone(),
+        start_line: min_line,
+        end_line: max_line,
+        lines,
+        match_count: results.len(), // 原始匹配数
+    }
+}
+
+/// 解析搜索查询字符串
+/// 
+/// 将管道符分隔的查询字符串拆分为多个搜索模式
+/// 例如: "error | timeout | 500" -> ["error", "timeout", "500"]
+pub fn parse_query(query: &str) -> Vec<String> {
+    query
+        .split('|')
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect()
+}
+
+/// 编译搜索模式为正则表达式
+/// 
+/// 将字符串模式转换为正则表达式对象，支持字面量匹配（默认转义）或真实正则表达式匹配
+pub fn compile_patterns(
+    patterns: &[String],
+    case_sensitive: bool,
+    is_regex: bool,
+) -> Result<Vec<Regex>, String> {
+    let mut compiled = Vec::new();
+
+    for pattern in patterns {
+        if pattern.is_empty() {
+            continue;
+        }
+
+        let pattern_str = if is_regex {
+            pattern.clone()
+        } else {
+            regex::escape(pattern)
+        };
+
+        let mut builder = RegexBuilder::new(&pattern_str);
+        builder.case_insensitive(!case_sensitive);
+        builder.multi_line(true);
+        builder.unicode(true);
+
+        let regex = builder
+            .build()
+            .map_err(|e| format!("无效的查询模式 '{}': {}", pattern, e))?;
+        compiled.push(regex);
+    }
+
+    if compiled.is_empty() {
+        return Err("查询不能为空".to_string());
+    }
