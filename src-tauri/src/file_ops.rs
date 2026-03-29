@@ -178,3 +178,83 @@ pub fn validate_inner_path(inner_path: &str) -> Result<String, String> {
 
 pub fn read_plain_file_lines(path: &Path) -> Result<Vec<String>, String> {
     let file = File::open(path).map_err(|e| format!("打开文件失败: {}", e))?;
+    let metadata = file.metadata().map_err(|e| format!("读取元数据失败: {}", e))?;
+    if metadata.len() > MAX_VIEW_FILE_SIZE {
+        return Err(format!(
+            "文件大小 ({} 字节) 超过单文件读取上限 ({} 字节)",
+            metadata.len(),
+            MAX_VIEW_FILE_SIZE
+        ));
+    }
+
+    let mut limited = file.take(MAX_VIEW_FILE_SIZE);
+    let mut bytes = Vec::new();
+    limited.read_to_end(&mut bytes).map_err(|e| format!("读取文件失败: {}", e))?;
+    let content = String::from_utf8_lossy(&bytes);
+    Ok(content.lines().map(|line| line.to_string()).collect())
+}
+
+pub fn read_archive_entry_lines(archive_path: &Path, inner_path: &str) -> Result<Vec<String>, String> {
+    let safe_inner = validate_inner_path(inner_path)?;
+    let archive_type = archive::detect_archive_type(archive_path)
+        .ok_or_else(|| "不支持的归档类型或无法识别的归档文件".to_string())?;
+
+    match archive_type {
+        "zip" => {
+            use zip::read::ZipArchive;
+
+            let file = std::fs::File::open(archive_path).map_err(|e| format!("打开归档文件失败: {}", e))?;
+            let mut archive =
+                ZipArchive::new(file).map_err(|e| format!("读取 ZIP 文件失败: {}", e))?;
+
+            for i in 0..archive.len() {
+                let mut entry = archive
+                    .by_index(i)
+                    .map_err(|e| format!("读取 ZIP 条目失败: {}", e))?;
+                let entry_name = normalize_inner_path(entry.name());
+                if entry_name == safe_inner {
+                    let mut buffer = Vec::new();
+                    let mut limited = (&mut entry).take(archive::MAX_ARCHIVE_ENTRY_SIZE);
+                    limited
+                        .read_to_end(&mut buffer)
+                        .map_err(|e| format!("读取 ZIP 条目内容失败: {}", e))?;
+                    let content = String::from_utf8_lossy(&buffer);
+                    return Ok(content.lines().map(|line| line.to_string()).collect());
+                }
+            }
+
+            Err(format!("未在 ZIP 归档中找到文件: {}", inner_path))
+        }
+        "tar" => {
+            use tar::Archive;
+
+            let file = std::fs::File::open(archive_path).map_err(|e| format!("打开归档文件失败: {}", e))?;
+            let mut archive = Archive::new(file);
+
+            for entry in archive
+                .entries()
+                .map_err(|e| format!("解析 TAR 条目失败: {}", e))?
+            {
+                let mut entry = entry.map_err(|e| format!("读取 TAR 条目失败: {}", e))?;
+                let path = entry
+                    .path()
+                    .map_err(|e| format!("解析 TAR 条目路径失败: {}", e))?
+                    .to_string_lossy()
+                    .to_string();
+                if normalize_inner_path(&path) == safe_inner {
+                    let mut buffer = Vec::new();
+                    let mut limited = (&mut entry).take(archive::MAX_ARCHIVE_ENTRY_SIZE);
+                    limited
+                        .read_to_end(&mut buffer)
+                        .map_err(|e| format!("读取 TAR 条目内容失败: {}", e))?;
+                    let content = String::from_utf8_lossy(&buffer);
+                    return Ok(content.lines().map(|line| line.to_string()).collect());
+                }
+            }
+
+            Err(format!("未在 TAR 归档中找到文件: {}", inner_path))
+        }
+        "gz" => {
+            use flate2::read::GzDecoder;
+
+            let file = std::fs::File::open(archive_path).map_err(|e| format!("打开归档文件失败: {}", e))?;

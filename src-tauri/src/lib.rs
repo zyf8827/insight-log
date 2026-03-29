@@ -1,4 +1,3 @@
-// + archive commands
 mod models;
 mod search;
 mod archive;
@@ -159,3 +158,63 @@ async fn get_file_info(
     use std::fs;
     
     let path_to_check = if let Some((archive_path, _)) = file_ops::parse_virtual_archive_path(&file_path) {
+        archive_path
+    } else {
+        PathBuf::from(&file_path)
+    };
+
+    let verified_path = state.check_path_allowed(&path_to_check)?;
+    if verified_path.is_dir() {
+        return Err("路径是一个目录，不是文件".to_string());
+    }
+
+    let metadata = fs::metadata(&verified_path)
+        .map_err(|e| format!("获取文件元数据失败: {}", e))?;
+    let size = metadata.len();
+
+    Ok(FileInfo {
+        size,
+        is_archive: archive::detect_archive_type(&verified_path).is_some(),
+    })
+}
+
+/// 获取压缩文件内容列表（带路径沙箱校验）
+#[tauri::command]
+async fn get_archive_contents(
+    archive_path: String,
+    state: tauri::State<'_, AppState>,
+) -> Result<Vec<String>, String> {
+    let verified_path = state.check_path_allowed(Path::new(&archive_path))?;
+
+    let archive_type = archive::detect_archive_type(&verified_path)
+        .ok_or_else(|| "不是有效的压缩文件或格式不受支持".to_string())?;
+
+    match archive_type {
+        "zip" => {
+            use std::fs::File;
+            use zip::read::ZipArchive;
+
+            let file = File::open(&verified_path).map_err(|e| format!("打开 ZIP 文件失败: {}", e))?;
+            let mut archive = ZipArchive::new(file).map_err(|e| format!("读取 ZIP 文件失败: {}", e))?;
+
+            let mut contents = Vec::new();
+            for i in 0..archive.len() {
+                let entry = archive.by_index(i).map_err(|e| format!("读取 ZIP 条目失败: {}", e))?;
+                if entry.is_file() && archive::is_text_file(&entry.name().to_lowercase()) {
+                    contents.push(entry.name().to_string());
+                }
+            }
+
+            Ok(contents)
+        }
+        "tar" => {
+            use std::fs::File;
+            use tar::Archive;
+
+            let file = File::open(&verified_path).map_err(|e| format!("打开 TAR 文件失败: {}", e))?;
+            let mut archive = Archive::new(file);
+
+            let mut contents = Vec::new();
+            for entry in archive.entries().map_err(|e| format!("解析 TAR 条目失败: {}", e))? {
+                let entry = entry.map_err(|e| format!("读取 TAR 条目失败: {}", e))?;
+                if entry.header().entry_type().is_file() {
