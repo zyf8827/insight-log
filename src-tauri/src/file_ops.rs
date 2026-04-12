@@ -258,3 +258,112 @@ pub fn read_archive_entry_lines(archive_path: &Path, inner_path: &str) -> Result
             use flate2::read::GzDecoder;
 
             let file = std::fs::File::open(archive_path).map_err(|e| format!("打开归档文件失败: {}", e))?;
+            let decoder = GzDecoder::new(file);
+            let mut limited = decoder.take(archive::MAX_ARCHIVE_ENTRY_SIZE);
+            let mut buffer = Vec::new();
+            limited
+                .read_to_end(&mut buffer)
+                .map_err(|e| format!("读取 GZ 内容失败: {}", e))?;
+            let content = String::from_utf8_lossy(&buffer);
+
+            Ok(content.lines().map(|line| line.to_string()).collect())
+        }
+        "7z" => {
+            let mut sz = sevenz_rust::SevenZReader::open(archive_path, sevenz_rust::Password::empty())
+                .map_err(|e| format!("打开 7z 归档文件失败: {}", e))?;
+            let mut found_content: Option<String> = None;
+
+            sz.for_each_entries(|entry, reader| {
+                if !entry.is_directory() && normalize_inner_path(entry.name()) == safe_inner {
+                    if entry.size() > archive::MAX_ARCHIVE_ENTRY_SIZE {
+                        return Err(sevenz_rust::Error::other(format!(
+                            "7z 条目大小超过上限: {} 字节",
+                            archive::MAX_ARCHIVE_ENTRY_SIZE
+                        )));
+                    }
+                    let mut buffer = Vec::new();
+                    let mut limited = reader.take(archive::MAX_ARCHIVE_ENTRY_SIZE);
+                    limited
+                        .read_to_end(&mut buffer)
+                        .map_err(sevenz_rust::Error::io)?;
+                    found_content = Some(String::from_utf8_lossy(&buffer).to_string());
+                    return Ok(false);
+                }
+                Ok(true)
+            })
+            .map_err(|e| format!("读取 7z 条目失败: {}", e))?;
+
+            match found_content {
+                Some(content) => Ok(content.lines().map(|line| line.to_string()).collect()),
+                None => Err(format!("未在 7z 归档中找到文件: {}", inner_path)),
+            }
+        }
+        _ => Err("不支持的归档类型".to_string()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_normalize_inner_path() {
+        assert_eq!(normalize_inner_path("./foo/bar.log"), "foo/bar.log");
+        assert_eq!(normalize_inner_path("\\foo\\bar.log"), "foo/bar.log");
+        assert_eq!(normalize_inner_path("/foo/bar.log"), "foo/bar.log");
+    }
+
+    #[test]
+    fn test_validate_inner_path() {
+        assert!(validate_inner_path("logs/app.log").is_ok());
+        assert!(validate_inner_path("../etc/passwd").is_err());
+        assert!(validate_inner_path("logs/../../secret").is_err());
+    }
+
+    #[test]
+    fn test_parse_virtual_archive_path() {
+        let vpath = "/var/log/app.zip → inner/server.log";
+        let parsed = parse_virtual_archive_path(vpath);
+        assert!(parsed.is_some());
+        let (archive, inner) = parsed.unwrap();
+        assert_eq!(archive, PathBuf::from("/var/log/app.zip"));
+        assert_eq!(inner, "inner/server.log");
+
+        assert!(parse_virtual_archive_path("normal_file.log").is_none());
+    }
+
+    #[test]
+    fn test_matches_patterns() {
+        let path = Path::new("/var/log/myapp.log");
+        let includes = vec!["**/*.log".to_string()];
+        let excludes = vec!["**/*.tmp".to_string()];
+        assert!(matches_patterns(path, &includes, &excludes));
+
+        let excluded_path = Path::new("/var/log/myapp.tmp");
+        assert!(!matches_patterns(excluded_path, &includes, &excludes));
+    }
+
+    #[test]
+    fn test_search_and_read_in_7z_archive() {
+        let temp_dir = std::env::temp_dir().join(format!("insight_7z_fileops_{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&temp_dir);
+        let src_file = temp_dir.join("access.log");
+        std::fs::write(&src_file, "line 1: regular info\nline 2: error timeout occurred\nline 3: end").unwrap();
+
+        let archive_file = temp_dir.join("access_archive.7z");
+        sevenz_rust::compress_to_path(&src_file, &archive_file).unwrap();
+
+        let patterns = vec![regex::Regex::new("error").unwrap(), regex::Regex::new("timeout").unwrap()];
+        let results = search_in_archive(&archive_file, &patterns).unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].line_number, 2);
+        assert!(results[0].content.contains("error timeout occurred"));
+        assert!(results[0].file_path.contains("access.log"));
+
+        let lines = read_archive_entry_lines(&archive_file, "access.log").unwrap();
+        assert_eq!(lines.len(), 3);
+        assert_eq!(lines[1], "line 2: error timeout occurred");
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+}

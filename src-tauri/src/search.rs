@@ -198,3 +198,134 @@ pub fn compile_patterns(
     if compiled.is_empty() {
         return Err("查询不能为空".to_string());
     }
+
+    Ok(compiled)
+}
+
+/// 检查一行是否匹配所有模式（AND操作）
+/// 
+/// 对一行文本检查是否匹配所有提供的正则表达式模式，返回所有匹配的位置
+pub fn matches_all_patterns(line: &str, patterns: &[Regex]) -> Vec<(usize, usize)> {
+    let mut all_positions = Vec::new();
+
+    for regex in patterns {
+        let mut pattern_matches = Vec::new();
+        // 查找当前模式在行中的所有匹配
+        for mat in regex.find_iter(line) {
+            pattern_matches.push((mat.start(), mat.end()));
+        }
+
+        // 如果任何模式不匹配，则整个链失败
+        if pattern_matches.is_empty() {
+            return Vec::new();
+        }
+
+        // 将字节索引转换为字符索引
+        for (start_byte, end_byte) in pattern_matches {
+            let start_char = byte_to_char_index(line, start_byte);
+            let end_char = byte_to_char_index(line, end_byte);
+            all_positions.push((start_char, end_char));
+        }
+    }
+
+    // 按位置排序
+    all_positions.sort_unstable();
+    all_positions
+}
+
+fn byte_to_char_index(s: &str, byte_idx: usize) -> usize {
+    if byte_idx >= s.len() {
+        return s.chars().count();
+    }
+
+    s[..byte_idx].chars().count()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_query() {
+        let q = "error | timeout | 500";
+        let parsed = parse_query(q);
+        assert_eq!(parsed, vec!["error", "timeout", "500"]);
+
+        let q_spaces = "  foo  |   bar   | ";
+        assert_eq!(parse_query(q_spaces), vec!["foo", "bar"]);
+    }
+
+    #[test]
+    fn test_compile_patterns_literal_mode() {
+        // In literal mode, regex special characters like [test] shouldn't fail or act as char sets
+        let patterns = vec!["[ERROR]".to_string(), "timeout*".to_string()];
+        let compiled = compile_patterns(&patterns, false, false).unwrap();
+        assert_eq!(compiled.len(), 2);
+
+        // Should match literal "[ERROR] timeout*"
+        let line = "2026-09-22 [ERROR] something timeout* occurred";
+        let matches = matches_all_patterns(line, &compiled);
+        assert!(!matches.is_empty());
+
+        // Should not match without square brackets
+        let line2 = "2026-09-22 ERROR something timeout";
+        let matches2 = matches_all_patterns(line2, &compiled);
+        assert!(matches2.is_empty());
+    }
+
+    #[test]
+    fn test_compile_patterns_regex_mode() {
+        let patterns = vec![r"err(or)?-\d{3}".to_string()];
+        let compiled = compile_patterns(&patterns, false, true).unwrap();
+        assert_eq!(compiled.len(), 1);
+
+        let line = "request failed with err-500";
+        let matches = matches_all_patterns(line, &compiled);
+        assert_eq!(matches, vec![(20, 27)]);
+
+        // Invalid regex should return error
+        let invalid = vec![r"(unclosed".to_string()];
+        assert!(compile_patterns(&invalid, false, true).is_err());
+    }
+
+    #[test]
+    fn test_matches_all_patterns_and_logic() {
+        let patterns = vec!["error".to_string(), "timeout".to_string()];
+        let compiled = compile_patterns(&patterns, false, false).unwrap();
+
+        // Must match BOTH (AND logic)
+        let both = "connection timeout with error";
+        assert!(!matches_all_patterns(both, &compiled).is_empty());
+
+        let only_error = "only error occurred";
+        assert!(matches_all_patterns(only_error, &compiled).is_empty());
+
+        let only_timeout = "only timeout occurred";
+        assert!(matches_all_patterns(only_timeout, &compiled).is_empty());
+    }
+
+    #[test]
+    fn test_merge_search_results() {
+        let results = vec![
+            SearchResult {
+                file_path: "app.log".to_string(),
+                line_number: 10,
+                content: "error 1".to_string(),
+                context: vec!["c9".to_string(), "error 1".to_string(), "c11".to_string()],
+                matched_positions: vec![(0, 5)],
+            },
+            SearchResult {
+                file_path: "app.log".to_string(),
+                line_number: 12,
+                content: "error 2".to_string(),
+                context: vec!["c11".to_string(), "error 2".to_string(), "c13".to_string()],
+                matched_positions: vec![(0, 5)],
+            },
+        ];
+
+        let merged = merge_search_results(results, 2);
+        assert_eq!(merged.len(), 1);
+        assert_eq!(merged[0].match_count, 2);
+        assert_eq!(merged[0].file_path, "app.log");
+    }
+}

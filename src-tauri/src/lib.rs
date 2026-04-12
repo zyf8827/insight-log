@@ -218,3 +218,337 @@ async fn get_archive_contents(
             for entry in archive.entries().map_err(|e| format!("解析 TAR 条目失败: {}", e))? {
                 let entry = entry.map_err(|e| format!("读取 TAR 条目失败: {}", e))?;
                 if entry.header().entry_type().is_file() {
+                    let path_str = entry.path()
+                        .map_err(|e| format!("解析 TAR 条目路径失败: {}", e))?
+                        .to_string_lossy()
+                        .to_string();
+                    
+                    if archive::is_text_file(&path_str.to_lowercase()) {
+                        contents.push(path_str);
+                    }
+                }
+            }
+
+            Ok(contents)
+        }
+        "gz" => {
+            Ok(vec![verified_path.file_name().unwrap_or_default().to_string_lossy().to_string()])
+        }
+        "7z" => {
+            let archive = sevenz_rust::Archive::open(&verified_path)
+                .map_err(|e| format!("读取 7z 归档结构失败: {}", e))?;
+            let mut contents = Vec::new();
+            for entry in &archive.files {
+                if !entry.is_directory() && archive::is_text_file(&entry.name().to_lowercase()) {
+                    contents.push(entry.name().to_string());
+                }
+            }
+            Ok(contents)
+        }
+        _ => Err("不支持的压缩文件格式".to_string()),
+    }
+}
+
+/// 读取压缩文件内特定文件内容（带路径沙箱校验）
+#[tauri::command]
+async fn read_archive_file_content(
+    archive_path: String,
+    inner_path: String,
+    start_line: usize,
+    end_line: Option<usize>,
+    state: tauri::State<'_, AppState>,
+) -> Result<serde_json::Value, String> {
+    let verified_path = state.check_path_allowed(Path::new(&archive_path))?;
+    let safe_inner = file_ops::validate_inner_path(&inner_path)?;
+
+    let lines = file_ops::read_archive_entry_lines(&verified_path, &safe_inner)?;
+    let total_lines = lines.len();
+    let start_index = std::cmp::min(start_line, total_lines);
+    let end_index = match end_line {
+        Some(end) => std::cmp::min(end, total_lines),
+        None => std::cmp::min(start_index + 1000, total_lines),
+    };
+
+    let selected_lines = if start_index < total_lines {
+        lines[start_index..end_index].to_vec()
+    } else {
+        vec![]
+    };
+
+    let content = selected_lines.join("\n");
+
+    Ok(serde_json::json!({
+        "content": content,
+        "startLine": start_index,
+        "endLine": end_index,
+        "totalLines": total_lines
+    }))
+}
+
+#[derive(serde::Serialize)]
+struct FileInfo {
+    size: u64,
+    is_archive: bool,
+}
+
+/// 搜索日志文件的主函数（贯通正则开关，并设置安全根目录）
+#[tauri::command]
+async fn search_logs(
+    search_params: SearchParams,
+    state: tauri::State<'_, AppState>,
+) -> Result<SearchResponse, String> {
+    let start_time = std::time::Instant::now();
+    let directory = Path::new(&search_params.directory);
+    if !directory.exists() {
+        return Err("目录不存在".to_string());
+    }
+
+    // 设置当前合法搜索根目录
+    state.set_root(directory);
+
+    let pattern_strings = search::parse_query(&search_params.query);
+    if pattern_strings.is_empty() {
+        return Err("查询不能为空".to_string());
+    }
+
+    let compiled_patterns = Arc::new(search::compile_patterns(
+        &pattern_strings,
+        search_params.case_sensitive,
+        search_params.is_regex,
+    )?);
+    let include_patterns = Arc::new(search_params.include_patterns.clone());
+    let exclude_patterns = Arc::new(search_params.exclude_patterns.clone());
+
+    let mut all_results: Vec<SearchResult> = Walk::new(directory)
+        .par_bridge()
+        .filter_map({
+            let compiled_patterns = Arc::clone(&compiled_patterns);
+            let include_patterns = Arc::clone(&include_patterns);
+            let exclude_patterns = Arc::clone(&exclude_patterns);
+            move |entry| {
+                let entry = match entry {
+                    Ok(e) => e,
+                    Err(err) => {
+                        eprintln!("遍历文件时出错: {}", err);
+                        return None;
+                    }
+                };
+
+                let file_path = entry.path();
+                if !file_path.is_file() {
+                    return None;
+                }
+
+                if is_useless_file(file_path) {
+                    return None;
+                }
+
+                if !file_ops::matches_patterns(
+                    file_path,
+                    include_patterns.as_slice(),
+                    exclude_patterns.as_slice(),
+                ) {
+                    return None;
+                }
+
+                let results = if archive::detect_archive_type(file_path).is_some() {
+                    match file_ops::search_in_archive(file_path, compiled_patterns.as_slice()) {
+                        Ok(res) => res,
+                        Err(err) => {
+                            eprintln!("在归档文件 {} 中搜索时出错: {}", file_path.display(), err);
+                            Vec::new()
+                        }
+                    }
+                } else {
+                    match file_ops::search_in_file(file_path, compiled_patterns.as_slice()) {
+                        Ok(res) => res,
+                        Err(err) => {
+                            eprintln!("在文件 {} 中搜索时出错: {}", file_path.display(), err);
+                            Vec::new()
+                        }
+                    }
+                };
+
+                if results.is_empty() {
+                    None
+                } else {
+                    Some(results)
+                }
+            }
+        })
+        .reduce(
+            || Vec::new(),
+            |mut acc, mut item| {
+                acc.append(&mut item);
+                acc
+            },
+        );
+
+    all_results.sort_by(|a, b| {
+        a.file_path
+            .cmp(&b.file_path)
+            .then(a.line_number.cmp(&b.line_number))
+    });
+
+    let total_matches = all_results.len();
+    let is_truncated = total_matches > search_params.max_results;
+    all_results.truncate(search_params.max_results);
+    let merged_results = search::merge_search_results(all_results, 10);
+    let elapsed_ms = start_time.elapsed().as_millis() as u64;
+
+    Ok(SearchResponse {
+        results: merged_results,
+        total_count: total_matches,
+        elapsed_ms,
+        is_truncated,
+    })
+}
+
+/// 选择目录的函数
+#[tauri::command]
+async fn select_directory(
+    app_handle: tauri::AppHandle,
+    state: tauri::State<'_, AppState>,
+) -> Result<Option<String>, String> {
+    use tauri_plugin_dialog::DialogExt;
+    use tokio::sync::oneshot;
+
+    let (sender, receiver) = oneshot::channel();
+
+    app_handle.dialog().file().pick_folder(move |result| {
+        let selected = result.map(|path| path.to_string());
+        let _ = sender.send(selected);
+    });
+
+    let selected = receiver.await.map_err(|e| format!("选择目录失败: {}", e))?;
+    if let Some(ref dir) = selected {
+        state.set_root(Path::new(dir));
+    }
+
+    Ok(selected)
+}
+
+/// 读取文件内容的函数（带路径沙箱校验）
+#[tauri::command]
+async fn read_file_content(
+    file_path: String,
+    start_line: usize,
+    end_line: Option<usize>,
+    state: tauri::State<'_, AppState>,
+) -> Result<serde_json::Value, String> {
+    let lines = if let Some((archive_path, inner_path)) = file_ops::parse_virtual_archive_path(&file_path) {
+        let verified_archive = state.check_path_allowed(&archive_path)?;
+        file_ops::validate_inner_path(&inner_path)?;
+        file_ops::read_archive_entry_lines(&verified_archive, &inner_path)?
+    } else {
+        let verified_path = state.check_path_allowed(Path::new(&file_path))?;
+        file_ops::read_plain_file_lines(&verified_path)?
+    };
+
+    let total_lines = lines.len();
+    let start_index = std::cmp::min(start_line, total_lines);
+    let end_index = match end_line {
+        Some(end) => std::cmp::min(end, total_lines),
+        None => std::cmp::min(start_index + 1000, total_lines),
+    };
+
+    let selected_lines = if start_index < total_lines {
+        lines[start_index..end_index].to_vec()
+    } else {
+        vec![]
+    };
+
+    let content = selected_lines.join("\n");
+
+    Ok(serde_json::json!({
+        "content": content,
+        "startLine": start_index,
+        "endLine": end_index,
+        "totalLines": total_lines
+    }))
+}
+
+/// 检查文件是否为明确不需要搜索的无用文件类型
+fn is_useless_file(file_path: &Path) -> bool {
+    let extensions = [
+        "swp", "swo", "swn", "swm", "swl", "swx",
+        "dmp", "dump",
+        "exe", "msi", "dll", "so", "dylib", "app", "bin", "out",
+        "pdf", "doc", "docx", "xls", "xlsx", "ppt", "pptx", "odt", "ods", "odp", "rtf",
+        "db", "sqlite", "sqlite3", "mdb", "accdb", "db3", "mdf", "ldf",
+        "jpg", "jpeg", "png", "gif", "bmp", "tiff", "tif", "webp", "svg", "ico", "psd", "ai", "eps",
+        "mp3", "wav", "flac", "aac", "ogg", "wma", "mp4", "avi", "mov", "wmv", "mkv", "flv", "webm",
+        "tmp", "temp", "bak", "backup", "old", "orig", "save", "autosave",
+        "o", "obj", "lib", "a", "class", "jar", "war", "pyc", "pyo",
+        "sys", "drv", "inf",
+        "iso", "img", "vmdk", "vdi", "vhd", "vhdx", "ova", "ovf", "qcow", "qcow2", "raw",
+        "dat", "bin", "hex", "elf",
+    ];
+
+    if let Some(ext) = file_path.extension() {
+        if let Some(ext_str) = ext.to_str() {
+            return extensions.iter().any(|&e| e.eq_ignore_ascii_case(ext_str));
+        }
+    }
+    
+    false
+}
+
+#[cfg_attr(mobile, tauri::mobile_entry_point)]
+pub fn run() {
+    tauri::Builder::default()
+        .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_opener::init())
+        .manage(AppState::new())
+        .invoke_handler(tauri::generate_handler![
+            search_logs,
+            select_directory,
+            read_file_content,
+            get_directory_structure,
+            get_file_info,
+            get_archive_contents,
+            read_archive_file_content
+        ])
+        .run(tauri::generate_context!())
+        .expect("运行 Tauri 应用时出错");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+
+    #[test]
+    fn test_app_state_path_scope_check() {
+        let temp_dir = std::env::temp_dir().join("insight_test_root");
+        let sub_dir = temp_dir.join("sub");
+        let _ = fs::create_dir_all(&sub_dir);
+        let allowed_file = sub_dir.join("allowed.log");
+        let _ = fs::write(&allowed_file, "log line");
+
+        let outside_dir = std::env::temp_dir().join("insight_test_outside");
+        let _ = fs::create_dir_all(&outside_dir);
+        let outside_file = outside_dir.join("secret.txt");
+        let _ = fs::write(&outside_file, "secret");
+
+        let state = AppState::new();
+        // 尚未设置根目录时，拒绝访问
+        assert!(state.check_path_allowed(&allowed_file).is_err());
+
+        // 设置根目录为 temp_dir
+        state.set_root(&temp_dir);
+
+        // 根目录内文件允许访问
+        assert!(state.check_path_allowed(&allowed_file).is_ok());
+
+        // 外部文件拒绝访问
+        assert!(state.check_path_allowed(&outside_file).is_err());
+
+        // 路径穿越 (例如 temp_dir/sub/../../insight_test_outside/secret.txt) 也会被 canonicalize 还原并拒绝
+        let traversal_path = sub_dir.join("../../../insight_test_outside/secret.txt");
+        assert!(state.check_path_allowed(&traversal_path).is_err());
+
+        let _ = fs::remove_dir_all(temp_dir);
+        let _ = fs::remove_dir_all(outside_dir);
+    }
+}

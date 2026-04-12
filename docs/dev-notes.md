@@ -1,2 +1,1 @@
-Trying zip/tar/gz sniffing.
-Will unify archive module.
+7z via sevenz-rust; remove readiness noise later.
