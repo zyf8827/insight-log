@@ -1,3 +1,4 @@
 # TODO
-- [ ] wire search backend
-- [ ] archive support
+- [x] search backend
+- [ ] 7z
+- [ ] docs polish
