@@ -7,6 +7,7 @@ import {
   Tooltip,
   Spin,
   Alert,
+  Modal,
   type InputRef,
 } from "antd";
 import {
@@ -56,11 +57,17 @@ interface SearchParams {
   max_results: number;
 }
 
+interface SkippedFileInfo {
+  path: string;
+  reason: string;
+}
+
 interface SearchResponse {
   results: MergedSearchResult[];
   total_count: number;
   elapsed_ms?: number;
   is_truncated?: boolean;
+  skipped_files?: SkippedFileInfo[];
 }
 
 interface FileGroup {
@@ -115,6 +122,8 @@ const App: React.FC = () => {
 
   const [secondaryFilter, setSecondaryFilter] = useState("");
   const [collapsedFiles, setCollapsedFiles] = useState<Set<string>>(new Set());
+  const [skippedFiles, setSkippedFiles] = useState<SkippedFileInfo[]>([]);
+  const [isSkippedModalOpen, setIsSkippedModalOpen] = useState(false);
 
   // Viewer states
   const [viewerState, setViewerState] = useState<{
@@ -203,6 +212,7 @@ const App: React.FC = () => {
         isTruncated: response.is_truncated,
         totalCount: response.total_count,
       });
+      setSkippedFiles(response.skipped_files || []);
       setHasSearched(true);
       setCollapsedFiles(new Set()); // reset collapsed state for new search
     } catch (err) {
@@ -222,6 +232,7 @@ const App: React.FC = () => {
     setHasSearched(false);
     setSecondaryFilter("");
     setSearchStats({});
+    setSkippedFiles([]);
   };
 
   const toggleFileCollapse = (filePath: string) => {
@@ -548,6 +559,18 @@ const App: React.FC = () => {
                     已达上限 {searchParams.max_results} 条 (部分结果已截断)
                   </span>
                 )}
+                {skippedFiles.length > 0 && (
+                  <Tooltip title="点击查看因超限或异常跳过的文件详情">
+                    <span
+                      className="stat-badge-skipped"
+                      onClick={() => setIsSkippedModalOpen(true)}
+                      role="button"
+                      tabIndex={0}
+                    >
+                      ⚠️ 跳过了 {skippedFiles.length} 个超限/损坏文件 (点击查看)
+                    </span>
+                  </Tooltip>
+                )}
                 {fileGroups.length > 0 && (
                   <span style={{ marginLeft: 6, display: "flex", gap: 6 }}>
                     <Button type="link" size="small" style={{ padding: 0 }} onClick={handleCollapseAll}>
@@ -768,6 +791,47 @@ const App: React.FC = () => {
         onClose={() => setFileViewerState({ visible: false, filePath: null })}
         filePath={fileViewerState.filePath}
       />
+
+      {/* Skipped Oversized / Corrupted Files Modal */}
+      <Modal
+        title="⚠️ 跳过的文件与异常列表"
+        open={isSkippedModalOpen}
+        onCancel={() => setIsSkippedModalOpen(false)}
+        footer={[
+          <Button key="close" type="primary" onClick={() => setIsSkippedModalOpen(false)}>
+            我知道了
+          </Button>,
+        ]}
+        width={720}
+      >
+        <Alert
+          message="文件读取与性能安全限额说明"
+          description="为防止超大文件或恶意压缩炸弹引发内存溢出 (OOM)，系统设置了防护硬限：单文件上限 100MB，归档单条目上限 20MB，归档总解压上限 100MB。超限、无读取权限或解析异常的文件已被自动跳过。"
+          type="warning"
+          showIcon
+          style={{ marginBottom: 16 }}
+        />
+        <div style={{ maxHeight: 360, overflowY: "auto" }}>
+          <table style={{ width: "100%", fontSize: 13, borderCollapse: "collapse" }}>
+            <thead>
+              <tr style={{ background: "#f1f5f9", textAlign: "left" }}>
+                <th style={{ padding: "8px 12px", borderBottom: "1px solid #e2e8f0" }}>文件路径</th>
+                <th style={{ padding: "8px 12px", borderBottom: "1px solid #e2e8f0", width: 220 }}>跳过原因</th>
+              </tr>
+            </thead>
+            <tbody>
+              {skippedFiles.map((file, idx) => (
+                <tr key={idx} style={{ borderBottom: "1px solid #f1f5f9" }}>
+                  <td style={{ padding: "8px 12px", fontFamily: "monospace", wordBreak: "break-all" }}>
+                    {file.path}
+                  </td>
+                  <td style={{ padding: "8px 12px", color: "#b45309" }}>{file.reason}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </Modal>
     </div>
   );
 };

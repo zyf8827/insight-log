@@ -1,5 +1,5 @@
 use crate::archive;
-use crate::models::SearchResult;
+use crate::models::{SearchResult, SkippedFileInfo};
 use memmap2::Mmap;
 use regex::Regex;
 use std::fs::File;
@@ -11,22 +11,22 @@ pub const MAX_SEARCH_FILE_SIZE: u64 = 100 * 1024 * 1024;
 /// 查看普通文件内容时的最大读取上限：50 MB
 pub const MAX_VIEW_FILE_SIZE: u64 = 50 * 1024 * 1024;
 
-/// 在单个文本文件中搜索
-/// 
-/// 检查文件大小上限后，使用内存映射直接在借用切片上按行搜索，避免不必要的堆分配大拷贝
-pub fn search_in_file(
+/// 在单个文本文件中搜索（记录跳过原因）
+pub fn search_in_file_with_skipped(
     file_path: &Path,
     patterns: &[Regex],
+    skipped: &mut Vec<SkippedFileInfo>,
 ) -> Result<Vec<SearchResult>, Box<dyn std::error::Error>> {
     let file = File::open(file_path)?;
     let metadata = file.metadata()?;
     if metadata.len() > MAX_SEARCH_FILE_SIZE {
-        eprintln!(
-            "跳过超大文件 {}: {} 字节 (上限 {} 字节)",
-            file_path.display(),
-            metadata.len(),
-            MAX_SEARCH_FILE_SIZE
-        );
+        skipped.push(SkippedFileInfo {
+            path: file_path.display().to_string(),
+            reason: format!(
+                "单文件大小超过搜索上限 100MB (实际: {:.1}MB)",
+                metadata.len() as f64 / (1024.0 * 1024.0)
+            ),
+        });
         return Ok(vec![]);
     }
 
@@ -64,10 +64,18 @@ pub fn search_in_file(
     Ok(results)
 }
 
-/// 处理归档文件并在其中搜索
-pub fn search_in_archive(
+pub fn search_in_file(
+    file_path: &Path,
+    patterns: &[Regex],
+) -> Result<Vec<SearchResult>, Box<dyn std::error::Error>> {
+    search_in_file_with_skipped(file_path, patterns, &mut Vec::new())
+}
+
+/// 处理归档文件并在其中搜索（记录跳过原因）
+pub fn search_in_archive_with_skipped(
     archive_path: &Path,
     patterns: &[Regex],
+    skipped: &mut Vec<SkippedFileInfo>,
 ) -> Result<Vec<SearchResult>, Box<dyn std::error::Error>> {
     let archive_type = match archive::detect_archive_type(archive_path) {
         Some(t) => t,
@@ -75,10 +83,10 @@ pub fn search_in_archive(
     };
 
     let archive_contents = match archive_type {
-        "zip" => archive::extract_zip_content(archive_path)?,
-        "tar" => archive::extract_tar_content(archive_path)?,
-        "gz" => archive::extract_gz_content(archive_path)?,
-        "7z" => archive::extract_7z_content(archive_path)?,
+        "zip" => archive::extract_zip_content_with_skipped(archive_path, skipped)?,
+        "tar" => archive::extract_tar_content_with_skipped(archive_path, skipped)?,
+        "gz" => archive::extract_gz_content_with_skipped(archive_path, skipped)?,
+        "7z" => archive::extract_7z_content_with_skipped(archive_path, skipped)?,
         _ => return Ok(vec![]),
     };
 
@@ -110,6 +118,13 @@ pub fn search_in_archive(
     }
 
     Ok(results)
+}
+
+pub fn search_in_archive(
+    archive_path: &Path,
+    patterns: &[Regex],
+) -> Result<Vec<SearchResult>, Box<dyn std::error::Error>> {
+    search_in_archive_with_skipped(archive_path, patterns, &mut Vec::new())
 }
 
 /// 根据 glob 模式过滤文件

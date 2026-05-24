@@ -1,4 +1,5 @@
 use std::path::Path;
+use crate::models::SkippedFileInfo;
 
 /// 单个归档条目解压硬上限：20 MB，防 Zip Bomb 与 OOM
 pub const MAX_ARCHIVE_ENTRY_SIZE: u64 = 20 * 1024 * 1024;
@@ -57,9 +58,10 @@ pub fn detect_archive_type(file_path: &Path) -> Option<&'static str> {
     None
 }
 
-/// 从 7z 文件中提取文本文件内容（带解压大小限制与防炸弹机制）
-pub fn extract_7z_content(
+/// 从 7z 文件中提取文本文件内容（带解压大小限制与防炸弹机制，并记录跳过的文件）
+pub fn extract_7z_content_with_skipped(
     file_path: &Path,
+    skipped: &mut Vec<SkippedFileInfo>,
 ) -> Result<Vec<(String, String)>, Box<dyn std::error::Error>> {
     use std::io::Read;
 
@@ -69,20 +71,19 @@ pub fn extract_7z_content(
 
     sz.for_each_entries(|entry, reader| {
         if total_extracted >= MAX_ARCHIVE_TOTAL_SIZE {
-            eprintln!(
-                "7z 压缩包 {} 解压总量已达上限 {} 字节，停止解压后续条目",
-                file_path.display(),
-                MAX_ARCHIVE_TOTAL_SIZE
-            );
+            skipped.push(SkippedFileInfo {
+                path: file_path.display().to_string(),
+                reason: format!("7z 压缩包解压总量已达上限 100MB，停止解压后续条目"),
+            });
             return Ok(false);
         }
 
         if !entry.is_directory() && is_text_file(&entry.name().to_lowercase()) {
             if entry.size() > MAX_ARCHIVE_ENTRY_SIZE {
-                eprintln!(
-                    "7z 条目 {} 大小超过单文件解压上限，已跳过",
-                    entry.name()
-                );
+                skipped.push(SkippedFileInfo {
+                    path: format!("{} → {}", file_path.display(), entry.name()),
+                    reason: format!("7z 条目大小超过单文件解压上限 20MB (实际: {:.1}MB)", entry.size() as f64 / (1024.0 * 1024.0)),
+                });
                 return Ok(true);
             }
 
@@ -101,9 +102,16 @@ pub fn extract_7z_content(
     Ok(results)
 }
 
-/// 从 ZIP 文件中提取文本文件内容（带解压大小限制与防炸弹机制）
-pub fn extract_zip_content(
+pub fn extract_7z_content(
     file_path: &Path,
+) -> Result<Vec<(String, String)>, Box<dyn std::error::Error>> {
+    extract_7z_content_with_skipped(file_path, &mut Vec::new())
+}
+
+/// 从 ZIP 文件中提取文本文件内容（带解压大小限制与防炸弹机制，并记录跳过的文件）
+pub fn extract_zip_content_with_skipped(
+    file_path: &Path,
+    skipped: &mut Vec<SkippedFileInfo>,
 ) -> Result<Vec<(String, String)>, Box<dyn std::error::Error>> {
     use std::io::Read;
     use zip::read::ZipArchive;
@@ -115,7 +123,10 @@ pub fn extract_zip_content(
 
     for i in 0..archive.len() {
         if total_extracted >= MAX_ARCHIVE_TOTAL_SIZE {
-            eprintln!("压缩包 {} 解压总量已达上限 {} 字节，停止解压后续条目", file_path.display(), MAX_ARCHIVE_TOTAL_SIZE);
+            skipped.push(SkippedFileInfo {
+                path: file_path.display().to_string(),
+                reason: format!("ZIP 压缩包解压总量已达上限 100MB，停止解压后续条目"),
+            });
             break;
         }
 
@@ -123,7 +134,10 @@ pub fn extract_zip_content(
         if entry.is_file() && is_text_file(&entry.name().to_lowercase()) {
             // 防 zip bomb：若条目声明的大小超过上限，跳过
             if entry.size() > MAX_ARCHIVE_ENTRY_SIZE {
-                eprintln!("条目 {} 大小超过单文件解压上限，已跳过", entry.name());
+                skipped.push(SkippedFileInfo {
+                    path: format!("{} → {}", file_path.display(), entry.name()),
+                    reason: format!("ZIP 条目大小超过单文件解压上限 20MB (实际: {:.1}MB)", entry.size() as f64 / (1024.0 * 1024.0)),
+                });
                 continue;
             }
 
@@ -140,9 +154,16 @@ pub fn extract_zip_content(
     Ok(results)
 }
 
-/// 从 TAR 文件中提取文本文件内容（带解压大小限制）
-pub fn extract_tar_content(
+pub fn extract_zip_content(
     file_path: &Path,
+) -> Result<Vec<(String, String)>, Box<dyn std::error::Error>> {
+    extract_zip_content_with_skipped(file_path, &mut Vec::new())
+}
+
+/// 从 TAR 文件中提取文本文件内容（带解压大小限制，并记录跳过的文件）
+pub fn extract_tar_content_with_skipped(
+    file_path: &Path,
+    skipped: &mut Vec<SkippedFileInfo>,
 ) -> Result<Vec<(String, String)>, Box<dyn std::error::Error>> {
     use std::io::Read;
     use tar::Archive;
@@ -154,7 +175,10 @@ pub fn extract_tar_content(
 
     for entry in archive.entries()? {
         if total_extracted >= MAX_ARCHIVE_TOTAL_SIZE {
-            eprintln!("TAR 归档 {} 解压总量已达上限，停止解压后续条目", file_path.display());
+            skipped.push(SkippedFileInfo {
+                path: file_path.display().to_string(),
+                reason: format!("TAR 归档解压总量已达上限 100MB，停止解压后续条目"),
+            });
             break;
         }
 
@@ -162,7 +186,11 @@ pub fn extract_tar_content(
         if entry.header().entry_type().is_file() {
             let size = entry.header().size()?;
             if size > MAX_ARCHIVE_ENTRY_SIZE {
-                eprintln!("TAR 条目大小超过上限，已跳过");
+                let entry_path = entry.path().map(|p| p.to_string_lossy().to_string()).unwrap_or_else(|_| "unknown".to_string());
+                skipped.push(SkippedFileInfo {
+                    path: format!("{} → {}", file_path.display(), entry_path),
+                    reason: format!("TAR 条目大小超过单文件解压上限 20MB (实际: {:.1}MB)", size as f64 / (1024.0 * 1024.0)),
+                });
                 continue;
             }
 
@@ -182,26 +210,47 @@ pub fn extract_tar_content(
     Ok(results)
 }
 
-/// 从 GZ 文件中提取内容（带解压大小限制）
-pub fn extract_gz_content(
+pub fn extract_tar_content(
     file_path: &Path,
+) -> Result<Vec<(String, String)>, Box<dyn std::error::Error>> {
+    extract_tar_content_with_skipped(file_path, &mut Vec::new())
+}
+
+/// 从 GZ 文件中提取内容（带解压大小限制，并记录跳过的文件）
+pub fn extract_gz_content_with_skipped(
+    file_path: &Path,
+    skipped: &mut Vec<SkippedFileInfo>,
 ) -> Result<Vec<(String, String)>, Box<dyn std::error::Error>> {
     use flate2::read::GzDecoder;
     use std::io::Read;
 
     let file = std::fs::File::open(file_path)?;
-    let decoder = GzDecoder::new(file);
-    let mut limited = decoder.take(MAX_ARCHIVE_ENTRY_SIZE);
+    let mut decoder = GzDecoder::new(file);
     let mut buffer = Vec::new();
+    let mut limited = (&mut decoder).take(MAX_ARCHIVE_ENTRY_SIZE);
     limited.read_to_end(&mut buffer)?;
-    let content = String::from_utf8_lossy(&buffer).to_string();
 
+    let mut extra = [0u8; 1];
+    if decoder.read(&mut extra).unwrap_or(0) > 0 {
+        skipped.push(SkippedFileInfo {
+            path: file_path.display().to_string(),
+            reason: format!("GZ 解压内容超过单文件解压上限 20MB，后续内容已截断"),
+        });
+    }
+
+    let content = String::from_utf8_lossy(&buffer).to_string();
     let file_name = file_path
         .file_name()
         .map(|f| f.to_string_lossy().to_string())
         .unwrap_or_else(|| "uncompressed".to_string());
 
     Ok(vec![(file_name, content)])
+}
+
+pub fn extract_gz_content(
+    file_path: &Path,
+) -> Result<Vec<(String, String)>, Box<dyn std::error::Error>> {
+    extract_gz_content_with_skipped(file_path, &mut Vec::new())
 }
 
 /// 检查文件扩展名是否为常见文本格式

@@ -7,7 +7,7 @@ use ignore::Walk;
 use rayon::prelude::*;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
-use crate::models::{SearchResult, SearchParams, SearchResponse};
+use crate::models::{SearchResult, SearchParams, SearchResponse, SkippedFileInfo};
 
 /// 应用程序全局状态，用于控制安全根目录范围，防止任意路径读取与路径穿越
 pub struct AppState {
@@ -319,18 +319,22 @@ async fn search_logs(
     let include_patterns = Arc::new(search_params.include_patterns.clone());
     let exclude_patterns = Arc::new(search_params.exclude_patterns.clone());
 
-    let mut all_results: Vec<SearchResult> = Walk::new(directory)
+    let (mut all_results, mut skipped_files): (Vec<SearchResult>, Vec<SkippedFileInfo>) = Walk::new(directory)
         .par_bridge()
         .filter_map({
             let compiled_patterns = Arc::clone(&compiled_patterns);
             let include_patterns = Arc::clone(&include_patterns);
             let exclude_patterns = Arc::clone(&exclude_patterns);
             move |entry| {
+                let mut local_skipped = Vec::new();
                 let entry = match entry {
                     Ok(e) => e,
                     Err(err) => {
-                        eprintln!("遍历文件时出错: {}", err);
-                        return None;
+                        local_skipped.push(SkippedFileInfo {
+                            path: "未知路径".to_string(),
+                            reason: format!("遍历文件时出错: {}", err),
+                        });
+                        return Some((Vec::new(), local_skipped));
                     }
                 };
 
@@ -352,34 +356,41 @@ async fn search_logs(
                 }
 
                 let results = if archive::detect_archive_type(file_path).is_some() {
-                    match file_ops::search_in_archive(file_path, compiled_patterns.as_slice()) {
+                    match file_ops::search_in_archive_with_skipped(file_path, compiled_patterns.as_slice(), &mut local_skipped) {
                         Ok(res) => res,
                         Err(err) => {
-                            eprintln!("在归档文件 {} 中搜索时出错: {}", file_path.display(), err);
+                            local_skipped.push(SkippedFileInfo {
+                                path: file_path.display().to_string(),
+                                reason: format!("在归档文件中搜索出错: {}", err),
+                            });
                             Vec::new()
                         }
                     }
                 } else {
-                    match file_ops::search_in_file(file_path, compiled_patterns.as_slice()) {
+                    match file_ops::search_in_file_with_skipped(file_path, compiled_patterns.as_slice(), &mut local_skipped) {
                         Ok(res) => res,
                         Err(err) => {
-                            eprintln!("在文件 {} 中搜索时出错: {}", file_path.display(), err);
+                            local_skipped.push(SkippedFileInfo {
+                                path: file_path.display().to_string(),
+                                reason: format!("在文件中搜索出错: {}", err),
+                            });
                             Vec::new()
                         }
                     }
                 };
 
-                if results.is_empty() {
+                if results.is_empty() && local_skipped.is_empty() {
                     None
                 } else {
-                    Some(results)
+                    Some((results, local_skipped))
                 }
             }
         })
         .reduce(
-            || Vec::new(),
+            || (Vec::new(), Vec::new()),
             |mut acc, mut item| {
-                acc.append(&mut item);
+                acc.0.append(&mut item.0);
+                acc.1.append(&mut item.1);
                 acc
             },
         );
@@ -401,6 +412,7 @@ async fn search_logs(
         total_count: total_matches,
         elapsed_ms,
         is_truncated,
+        skipped_files,
     })
 }
 

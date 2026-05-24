@@ -36,6 +36,12 @@ pub struct SearchParams {
     pub max_results: usize,
 }
 
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq)]
+pub struct SkippedFileInfo {
+    pub path: String,
+    pub reason: String,
+}
+
 #[derive(serde::Serialize, serde::Deserialize, Clone)]
 pub struct SearchResponse {
     pub results: Vec<MergedSearchResult>,
@@ -44,4 +50,6 @@ pub struct SearchResponse {
     pub elapsed_ms: u64,
     #[serde(default)]
     pub is_truncated: bool,
+    #[serde(default)]
+    pub skipped_files: Vec<SkippedFileInfo>,
 }
