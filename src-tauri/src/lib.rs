@@ -306,7 +306,7 @@ async fn search_logs(
     // 设置当前合法搜索根目录
     state.set_root(directory);
 
-    let pattern_strings = search::parse_query(&search_params.query);
+    let pattern_strings = search::parse_query_mode(&search_params.query, search_params.is_regex);
     if pattern_strings.is_empty() {
         return Err("查询不能为空".to_string());
     }

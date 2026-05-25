@@ -160,6 +160,19 @@ const App: React.FC = () => {
     return count;
   }, [includeText, excludeText, searchParams.max_results]);
 
+  const regexError = useMemo(() => {
+    if (!searchParams.is_regex || !searchParams.query.trim()) {
+      return null;
+    }
+    try {
+      new RegExp(searchParams.query);
+      return null;
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      return msg;
+    }
+  }, [searchParams.is_regex, searchParams.query]);
+
   const handleDirectorySelect = async () => {
     try {
       setLoading(true);
@@ -182,6 +195,10 @@ const App: React.FC = () => {
     }
     if (!searchParams.query.trim()) {
       setError("请输入搜索关键词 (支持管道多条件，如 error | timeout)");
+      return;
+    }
+    if (regexError) {
+      setError(`正则表达式语法错误: ${regexError}`);
       return;
     }
 
@@ -411,7 +428,12 @@ const App: React.FC = () => {
                   ref={searchInputRef}
                   className="main-search-input"
                   size="large"
-                  placeholder="搜索日志内容 (支持管道多条件，如 error | timeout)"
+                  status={regexError ? "error" : undefined}
+                  placeholder={
+                    searchParams.is_regex
+                      ? "输入正则表达式 (如 (NullPointer|IndexOutOfBounds)Exception)"
+                      : "搜索日志内容 (管道多条件如 error | timeout，支持 \\| 转义)"
+                  }
                   prefix={<SearchOutlined style={{ color: "#94a3b8", marginRight: 4 }} />}
                   value={searchParams.query}
                   onChange={(e) =>
@@ -459,6 +481,11 @@ const App: React.FC = () => {
                     </div>
                   }
                 />
+                {regexError && (
+                  <div className="regex-error-hint">
+                    ⚠️ 正则语法错误: {regexError}
+                  </div>
+                )}
               </div>
 
               <Button
@@ -466,7 +493,7 @@ const App: React.FC = () => {
                 size="large"
                 icon={<SearchOutlined />}
                 loading={loading}
-                disabled={!searchParams.directory || !searchParams.query.trim()}
+                disabled={!searchParams.directory || !searchParams.query.trim() || !!regexError}
                 onClick={handleSearch}
                 style={{ fontWeight: 600, padding: "0 22px" }}
               >

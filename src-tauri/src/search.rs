@@ -153,14 +153,53 @@ fn create_merged_result(results: Vec<SearchResult>, context_lines: usize) -> Mer
 
 /// 解析搜索查询字符串
 /// 
-/// 将管道符分隔的查询字符串拆分为多个搜索模式
-/// 例如: "error | timeout | 500" -> ["error", "timeout", "500"]
+/// 当 is_regex 为 true 时，整段查询视为一个完整的正则表达式，不按管道符切分
+/// 当 is_regex 为 false 时，按 '|' 管道切分为多个 AND 条件，同时支持 '\|' 转义为字面量 '|'
+pub fn parse_query_mode(query: &str, is_regex: bool) -> Vec<String> {
+    if is_regex {
+        let trimmed = query.trim();
+        if trimmed.is_empty() {
+            vec![]
+        } else {
+            vec![trimmed.to_string()]
+        }
+    } else {
+        let mut patterns = Vec::new();
+        let mut current = String::new();
+        let mut chars = query.chars().peekable();
+
+        while let Some(ch) = chars.next() {
+            if ch == '\\' {
+                if let Some(&next_ch) = chars.peek() {
+                    if next_ch == '|' {
+                        current.push('|');
+                        chars.next();
+                        continue;
+                    }
+                }
+                current.push('\\');
+            } else if ch == '|' {
+                let trimmed = current.trim();
+                if !trimmed.is_empty() {
+                    patterns.push(trimmed.to_string());
+                }
+                current.clear();
+            } else {
+                current.push(ch);
+            }
+        }
+
+        let trimmed = current.trim();
+        if !trimmed.is_empty() {
+            patterns.push(trimmed.to_string());
+        }
+
+        patterns
+    }
+}
+
 pub fn parse_query(query: &str) -> Vec<String> {
-    query
-        .split('|')
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
-        .collect()
+    parse_query_mode(query, false)
 }
 
 /// 编译搜索模式为正则表达式
@@ -253,6 +292,29 @@ mod tests {
 
         let q_spaces = "  foo  |   bar   | ";
         assert_eq!(parse_query(q_spaces), vec!["foo", "bar"]);
+    }
+
+    #[test]
+    fn test_parse_query_mode_escaped_pipe() {
+        let q = r"2026-09-23 \| ERROR | timeout";
+        let parsed = parse_query_mode(q, false);
+        assert_eq!(parsed, vec!["2026-09-23 | ERROR", "timeout"]);
+    }
+
+    #[test]
+    fn test_parse_query_mode_regex_preserves_pipe() {
+        let q = r"(NullPointer|IndexOutOfBounds)Exception";
+        let parsed = parse_query_mode(q, true);
+        assert_eq!(parsed, vec![r"(NullPointer|IndexOutOfBounds)Exception"]);
+
+        let compiled = compile_patterns(&parsed, false, true).unwrap();
+        assert_eq!(compiled.len(), 1);
+        let line1 = "Caught NullPointerException at line 42";
+        assert!(!matches_all_patterns(line1, &compiled).is_empty());
+        let line2 = "Caught IndexOutOfBoundsException at line 88";
+        assert!(!matches_all_patterns(line2, &compiled).is_empty());
+        let line3 = "Caught IllegalArgumentException at line 10";
+        assert!(matches_all_patterns(line3, &compiled).is_empty());
     }
 
     #[test]
