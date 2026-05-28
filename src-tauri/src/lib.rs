@@ -482,28 +482,11 @@ async fn read_file_content(
 
 /// 检查文件是否为明确不需要搜索的无用文件类型
 fn is_useless_file(file_path: &Path) -> bool {
-    let extensions = [
-        "swp", "swo", "swn", "swm", "swl", "swx",
-        "dmp", "dump",
-        "exe", "msi", "dll", "so", "dylib", "app", "bin", "out",
-        "pdf", "doc", "docx", "xls", "xlsx", "ppt", "pptx", "odt", "ods", "odp", "rtf",
-        "db", "sqlite", "sqlite3", "mdb", "accdb", "db3", "mdf", "ldf",
-        "jpg", "jpeg", "png", "gif", "bmp", "tiff", "tif", "webp", "svg", "ico", "psd", "ai", "eps",
-        "mp3", "wav", "flac", "aac", "ogg", "wma", "mp4", "avi", "mov", "wmv", "mkv", "flv", "webm",
-        "tmp", "temp", "bak", "backup", "old", "orig", "save", "autosave",
-        "o", "obj", "lib", "a", "class", "jar", "war", "pyc", "pyo",
-        "sys", "drv", "inf",
-        "iso", "img", "vmdk", "vdi", "vhd", "vhdx", "ova", "ovf", "qcow", "qcow2", "raw",
-        "dat", "bin", "hex", "elf",
-    ];
-
-    if let Some(ext) = file_path.extension() {
-        if let Some(ext_str) = ext.to_str() {
-            return extensions.iter().any(|&e| e.eq_ignore_ascii_case(ext_str));
-        }
-    }
-    
-    false
+    let file_name = file_path
+        .file_name()
+        .map(|f| f.to_string_lossy().to_string())
+        .unwrap_or_default();
+    archive::is_useless_file_by_name(&file_name)
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]

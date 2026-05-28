@@ -78,10 +78,11 @@ pub fn extract_7z_content_with_skipped(
             return Ok(false);
         }
 
-        if !entry.is_directory() && is_text_file(&entry.name().to_lowercase()) {
+        let entry_name = entry.name().to_string();
+        if !entry.is_directory() && is_text_file(&entry_name) {
             if entry.size() > MAX_ARCHIVE_ENTRY_SIZE {
                 skipped.push(SkippedFileInfo {
-                    path: format!("{} → {}", file_path.display(), entry.name()),
+                    path: format!("{} → {}", file_path.display(), entry_name),
                     reason: format!("7z 条目大小超过单文件解压上限 20MB (实际: {:.1}MB)", entry.size() as f64 / (1024.0 * 1024.0)),
                 });
                 return Ok(true);
@@ -92,8 +93,16 @@ pub fn extract_7z_content_with_skipped(
             let read_bytes = limited.read_to_end(&mut buffer).map_err(sevenz_rust::Error::io)? as u64;
             total_extracted += read_bytes;
 
+            // 无后缀条目：读前 512 字节，若含 \0 则视为二进制跳过
+            if !has_file_extension(&entry_name) {
+                let probe_len = buffer.len().min(512);
+                if buffer[..probe_len].contains(&0) {
+                    return Ok(true);
+                }
+            }
+
             let content = String::from_utf8_lossy(&buffer).to_string();
-            results.push((entry.name().to_string(), content));
+            results.push((entry_name, content));
         }
 
         Ok(true)
@@ -131,11 +140,12 @@ pub fn extract_zip_content_with_skipped(
         }
 
         let mut entry = archive.by_index(i)?;
-        if entry.is_file() && is_text_file(&entry.name().to_lowercase()) {
+        let entry_name = entry.name().to_string();
+        if entry.is_file() && is_text_file(&entry_name) {
             // 防 zip bomb：若条目声明的大小超过上限，跳过
             if entry.size() > MAX_ARCHIVE_ENTRY_SIZE {
                 skipped.push(SkippedFileInfo {
-                    path: format!("{} → {}", file_path.display(), entry.name()),
+                    path: format!("{} → {}", file_path.display(), entry_name),
                     reason: format!("ZIP 条目大小超过单文件解压上限 20MB (实际: {:.1}MB)", entry.size() as f64 / (1024.0 * 1024.0)),
                 });
                 continue;
@@ -146,8 +156,16 @@ pub fn extract_zip_content_with_skipped(
             let read_bytes = limited.read_to_end(&mut buffer)? as u64;
             total_extracted += read_bytes;
 
+            // 无后缀条目：读前 512 字节，若含 \0 则视为二进制跳过
+            if !has_file_extension(&entry_name) {
+                let probe_len = buffer.len().min(512);
+                if buffer[..probe_len].contains(&0) {
+                    continue;
+                }
+            }
+
             let content = String::from_utf8_lossy(&buffer).to_string();
-            results.push((entry.name().to_string(), content));
+            results.push((entry_name, content));
         }
     }
 
@@ -195,11 +213,19 @@ pub fn extract_tar_content_with_skipped(
             }
 
             let path = entry.path()?.to_string_lossy().to_string();
-            if is_text_file(&path.to_lowercase()) {
+            if is_text_file(&path) {
                 let mut buffer = Vec::new();
                 let mut limited = (&mut entry).take(MAX_ARCHIVE_ENTRY_SIZE);
                 let read_bytes = limited.read_to_end(&mut buffer)? as u64;
                 total_extracted += read_bytes;
+
+                // 无后缀条目：读前 512 字节，若含 \0 则视为二进制跳过
+                if !has_file_extension(&path) {
+                    let probe_len = buffer.len().min(512);
+                    if buffer[..probe_len].contains(&0) {
+                        continue;
+                    }
+                }
 
                 let content = String::from_utf8_lossy(&buffer).to_string();
                 results.push((path, content));
@@ -253,22 +279,29 @@ pub fn extract_gz_content(
     extract_gz_content_with_skipped(file_path, &mut Vec::new())
 }
 
-/// 检查文件扩展名是否为常见文本格式
-pub fn is_text_file(file_name: &str) -> bool {
-    let text_extensions = [
-        ".log", ".txt", ".json", ".yaml", ".yml", ".xml", ".csv", ".tsv", ".sql", ".html", ".htm",
-        ".js", ".ts", ".css", ".py", ".rs", ".go", ".java", ".c", ".cpp", ".h", ".hpp",
-    ];
-    
-    if is_useless_file_by_name(file_name) {
-        return false;
-    }
-    
-    text_extensions.iter().any(|ext| file_name.ends_with(ext))
+/// 检查文件名是否有扩展名
+pub fn has_file_extension(file_name: &str) -> bool {
+    let base_name = file_name.rsplit('/').next().unwrap_or(file_name);
+    let base_name = base_name.rsplit('\\').next().unwrap_or(base_name);
+    base_name.contains('.')
 }
 
 /// 检查文件名是否对应应当跳过的无用二进制格式
 pub fn is_useless_file_by_name(file_name: &str) -> bool {
+    let lower = file_name.to_lowercase();
+    let base_name = lower.rsplit('/').next().unwrap_or(&lower);
+    let base_name = base_name.rsplit('\\').next().unwrap_or(base_name);
+
+    // 针对 catalina.out, nohup.out 等常见日志输出文件，不作为 .out 二进制文件过滤
+    if base_name == "catalina.out"
+        || base_name == "nohup.out"
+        || base_name.starts_with("catalina")
+        || base_name.starts_with("nohup")
+        || base_name.ends_with(".log.out")
+    {
+        return false;
+    }
+
     let extensions = [
         "swp", "swo", "swn", "swm", "swl", "swx",
         "dmp", "dump",
@@ -278,18 +311,78 @@ pub fn is_useless_file_by_name(file_name: &str) -> bool {
         "jpg", "jpeg", "png", "gif", "bmp", "tiff", "tif", "webp", "svg", "ico", "psd", "ai", "eps",
         "mp3", "wav", "flac", "aac", "ogg", "wma", "mp4", "avi", "mov", "wmv", "mkv", "flv", "webm",
         "tmp", "temp", "bak", "backup", "old", "orig", "save", "autosave",
-        "o", "obj", "lib", "a", "class", "pyc", "pyo",
+        "o", "obj", "lib", "a", "class", "jar", "war", "pyc", "pyo",
         "sys", "drv", "inf",
         "iso", "img", "vmdk", "vdi", "vhd", "vhdx", "ova", "ovf", "qcow", "qcow2", "raw",
         "dat", "hex", "elf",
     ];
 
     for ext in extensions.iter() {
-        if file_name.to_lowercase().ends_with(&format!(".{}", ext)) {
+        if base_name.ends_with(&format!(".{}", ext)) {
             return true;
         }
     }
     
+    false
+}
+
+/// 检查文件扩展名或文件名是否为常见文本/日志格式
+pub fn is_text_file(file_name: &str) -> bool {
+    let lower = file_name.to_lowercase();
+    let base_name = lower.rsplit('/').next().unwrap_or(&lower);
+    let base_name = base_name.rsplit('\\').next().unwrap_or(base_name);
+
+    if is_useless_file_by_name(base_name) {
+        return false;
+    }
+
+    // 1. 常见系统日志文件名或前缀（包含无后缀与特殊后缀）
+    if base_name == "catalina.out"
+        || base_name == "nohup.out"
+        || base_name == "syslog"
+        || base_name == "messages"
+        || base_name == "dmesg"
+        || base_name == "boot.log"
+        || base_name == "kern.log"
+        || base_name == "auth.log"
+        || base_name.starts_with("syslog")
+        || base_name.starts_with("messages")
+        || base_name.starts_with("catalina")
+        || base_name.starts_with("nohup")
+    {
+        return true;
+    }
+
+    // 2. 常见文本/配置扩展名
+    let text_extensions = [
+        ".log", ".txt", ".json", ".yaml", ".yml", ".xml", ".csv", ".tsv", ".sql", ".html", ".htm",
+        ".js", ".ts", ".css", ".py", ".rs", ".go", ".java", ".c", ".cpp", ".h", ".hpp",
+        ".sh", ".bash", ".zsh", ".conf", ".ini", ".properties", ".env", ".toml", ".md",
+    ];
+
+    if text_extensions.iter().any(|ext| base_name.ends_with(ext)) {
+        return true;
+    }
+
+    // 3. 常见轮转日志格式：*.log.N, *.log.YYYY-MM-DD, *.log.YYYYMMDD, *.txt.N
+    if let Some(pos) = base_name.find(".log.") {
+        let suffix = &base_name[pos + 5..];
+        if !suffix.is_empty() && suffix.chars().all(|c| c.is_ascii_digit() || c == '-' || c == '_' || c == '.') {
+            return true;
+        }
+    }
+    if let Some(pos) = base_name.find(".txt.") {
+        let suffix = &base_name[pos + 5..];
+        if !suffix.is_empty() && suffix.chars().all(|c| c.is_ascii_digit() || c == '-' || c == '_' || c == '.') {
+            return true;
+        }
+    }
+
+    // 4. 无后缀条目：放宽当做候选文本，解压时读前 512 字节探测无 \0 判定为文本
+    if !base_name.contains('.') {
+        return true;
+    }
+
     false
 }
 
@@ -304,6 +397,33 @@ mod tests {
         assert!(is_text_file("app.json"));
         assert!(!is_text_file("image.png"));
         assert!(!is_text_file("binary.exe"));
+        assert!(!is_text_file("program.out"));
+    }
+
+    #[test]
+    fn test_rotated_logs_and_catalina() {
+        // Rotated logs
+        assert!(is_text_file("app.log.1"));
+        assert!(is_text_file("server.log.2"));
+        assert!(is_text_file("access.log.2026-05-28"));
+        assert!(is_text_file("error.log.20260528"));
+        assert!(is_text_file("syslog.1"));
+        assert!(is_text_file("syslog.2026-05-28"));
+        assert!(is_text_file("messages.1"));
+
+        // Catalina / Nohup out
+        assert!(is_text_file("catalina.out"));
+        assert!(is_text_file("catalina.2026-05-28.out"));
+        assert!(is_text_file("nohup.out"));
+        assert!(!is_useless_file_by_name("catalina.out"));
+        assert!(!is_useless_file_by_name("nohup.out"));
+        assert!(!is_useless_file_by_name("catalina.2026-05-28.out"));
+
+        // System logs without extensions
+        assert!(is_text_file("syslog"));
+        assert!(is_text_file("messages"));
+        assert!(is_text_file("dmesg"));
+        assert!(is_text_file("unnamed_log"));
     }
 
     #[test]
