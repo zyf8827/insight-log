@@ -1,8 +1,8 @@
 import { useState, useEffect, useMemo } from 'react';
 import { Modal, Spin, message, Button, Space } from 'antd';
 import CodeMirror from '@uiw/react-codemirror';
-import { javascript } from '@codemirror/lang-javascript';
-import { lineNumbers } from '@codemirror/view';
+import { lineNumbers, EditorView, Decoration, type DecorationSet, ViewPlugin, type ViewUpdate } from '@codemirror/view';
+import { RangeSetBuilder } from '@codemirror/state';
 import { invoke } from '@tauri-apps/api/core';
 
 type FileViewerProps = {
@@ -17,6 +17,51 @@ type LoadedRange = {
   end: number;
   content: string;
 };
+
+const errorDeco = Decoration.mark({ class: "cm-log-error" });
+const warnDeco = Decoration.mark({ class: "cm-log-warn" });
+const infoDeco = Decoration.mark({ class: "cm-log-info" });
+const debugDeco = Decoration.mark({ class: "cm-log-debug" });
+
+const logSyntaxHighlighter = ViewPlugin.fromClass(
+  class {
+    decorations: DecorationSet;
+    constructor(view: EditorView) {
+      this.decorations = this.buildDecorations(view);
+    }
+    update(update: ViewUpdate) {
+      if (update.docChanged || update.viewportChanged) {
+        this.decorations = this.buildDecorations(update.view);
+      }
+    }
+    buildDecorations(view: EditorView) {
+      const builder = new RangeSetBuilder<Decoration>();
+      for (const { from, to } of view.visibleRanges) {
+        const text = view.state.doc.sliceString(from, to);
+        const regex = /\b(FATAL|ERROR|SEVERE)\b|\b(WARN|WARNING)\b|\b(INFO)\b|\b(DEBUG|TRACE)\b/gi;
+        let match;
+        while ((match = regex.exec(text)) !== null) {
+          const start = from + match.index;
+          const end = start + match[0].length;
+          const upper = match[0].toUpperCase();
+          if (upper === "FATAL" || upper === "ERROR" || upper === "SEVERE") {
+            builder.add(start, end, errorDeco);
+          } else if (upper === "WARN" || upper === "WARNING") {
+            builder.add(start, end, warnDeco);
+          } else if (upper === "INFO") {
+            builder.add(start, end, infoDeco);
+          } else {
+            builder.add(start, end, debugDeco);
+          }
+        }
+      }
+      return builder.finish();
+    }
+  },
+  {
+    decorations: (v) => v.decorations,
+  }
+);
 
 export default function FileViewer({ visible, onClose, filePath, initialLine }: FileViewerProps) {
   const [loadedRanges, setLoadedRanges] = useState<LoadedRange[]>([]);
@@ -69,12 +114,10 @@ export default function FileViewer({ visible, onClose, filePath, initialLine }: 
         );
         
         if (existingIndex !== -1) {
-          // If already exists, update it
           const updated = [...prev];
           updated[existingIndex] = newRange;
           return updated;
         } else {
-          // Otherwise, add the new range
           return [...prev, newRange];
         }
       });
@@ -94,20 +137,16 @@ export default function FileViewer({ visible, onClose, filePath, initialLine }: 
       return;
     }
 
-    // Clear previous ranges when opening a new file
     setLoadedRanges([]);
     
-    // Determine the initial line range to load
     if (initialLine !== null && initialLine > 0) {
-      // For search results: load from initialLine - 1, up to initialLine + 999 (1000 lines total)
-      const start = Math.max(0, initialLine - 1); // Convert to 0-based and ensure non-negative
-      const end = Math.min(start + maxLinesPerLoad, totalLines || start + maxLinesPerLoad);
+      const start = Math.max(0, initialLine - 1);
+      const end = start + maxLinesPerLoad;
       void fetchContent(start, end);
     } else {
-      // For file list: load first 1000 lines
       void fetchContent(0, maxLinesPerLoad);
     }
-  }, [visible, filePath, initialLine, totalLines]);
+  }, [visible, filePath, initialLine]);
 
   useEffect(() => {
     if (!visible) {
@@ -116,11 +155,34 @@ export default function FileViewer({ visible, onClose, filePath, initialLine }: 
     }
   }, [visible]);
 
-  // Combine all loaded ranges in order
-  const combinedContent = useMemo(() => {
-    // Sort ranges by start line and combine them in order
+  // Combine loaded ranges and calculate physical line mapping
+  const { combinedContent, lineIndexToPhysicalLine } = useMemo(() => {
+    if (loadedRanges.length === 0) {
+      return { combinedContent: '', lineIndexToPhysicalLine: [] as number[] };
+    }
     const sortedRanges = [...loadedRanges].sort((a, b) => a.start - b.start);
-    return sortedRanges.map(range => range.content).join('\n');
+    const lineNumbersList: number[] = [];
+    const contents: string[] = [];
+
+    sortedRanges.forEach((range, rangeIdx) => {
+      if (rangeIdx > 0) {
+        const prevRange = sortedRanges[rangeIdx - 1];
+        if (range.start > prevRange.end) {
+          contents.push(`--- [省略了第 ${prevRange.end + 1} 至 ${range.start} 行] ---`);
+          lineNumbersList.push(0);
+        }
+      }
+      const lines = range.content.split('\n');
+      lines.forEach((_, idx) => {
+        lineNumbersList.push(range.start + 1 + idx);
+      });
+      contents.push(range.content);
+    });
+
+    return {
+      combinedContent: contents.join('\n'),
+      lineIndexToPhysicalLine: lineNumbersList,
+    };
   }, [loadedRanges]);
 
   // Calculate the full range of loaded content
@@ -133,22 +195,21 @@ export default function FileViewer({ visible, onClose, filePath, initialLine }: 
     };
   }, [loadedRanges]);
 
-  // Create a custom line number extension that shows actual file line numbers
+  // Create a custom line number extension that ALWAYS shows actual physical file line numbers
   const extensions = useMemo(() => {
-    // If we only have one range loaded, use custom line numbers starting from the correct line
-    if (loadedRanges.length === 1 && loadedRanges[0]) {
-      const startLineNum = loadedRanges[0].start + 1; // Convert to 1-based
-      return [
-        lineNumbers({
-          formatNumber: (n: number) => String(n + startLineNum - 1)
-        }),
-        javascript({ jsx: true })
-      ];
-    } 
-    // For multiple ranges, we keep the default numbering since displaying absolute line numbers 
-    // across fragmented content in a single editor view is complex
-    return [lineNumbers(), javascript({ jsx: true })];
-  }, [loadedRanges]);
+    return [
+      lineNumbers({
+        formatNumber: (n: number) => {
+          const physical = lineIndexToPhysicalLine[n - 1];
+          if (physical !== undefined && physical > 0) {
+            return String(physical);
+          }
+          return '...';
+        },
+      }),
+      logSyntaxHighlighter,
+    ];
+  }, [lineIndexToPhysicalLine]);
 
   // Load previous 1000 lines
   const loadPrevious = () => {
