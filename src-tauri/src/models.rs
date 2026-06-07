@@ -53,3 +53,11 @@ pub struct SearchResponse {
     #[serde(default)]
     pub skipped_files: Vec<SkippedFileInfo>,
 }
+
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq)]
+pub struct DroppedPathInfo {
+    pub root_directory: String,
+    pub is_directory: bool,
+    pub file_name: Option<String>,
+    pub is_archive: bool,
+}

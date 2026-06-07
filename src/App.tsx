@@ -1,5 +1,6 @@
 import React, { useState, useMemo, useRef, useEffect, useCallback } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { getCurrentWebview } from "@tauri-apps/api/webview";
 import {
   Button,
   Input,
@@ -8,7 +9,11 @@ import {
   Spin,
   Alert,
   Modal,
+  Dropdown,
+  Switch,
+  message,
   type InputRef,
+  type MenuProps,
 } from "antd";
 import {
   FolderOpenOutlined,
@@ -24,6 +29,8 @@ import {
   FileTextOutlined,
   FileZipOutlined,
   CloseOutlined,
+  HistoryOutlined,
+  DeleteOutlined,
 } from "@ant-design/icons";
 import { useVirtualizer } from "@tanstack/react-virtual";
 
@@ -60,6 +67,39 @@ interface SearchParams {
 interface SkippedFileInfo {
   path: string;
   reason: string;
+}
+
+interface DroppedPathInfo {
+  root_directory: string;
+  is_directory: boolean;
+  file_name: string | null;
+  is_archive: boolean;
+}
+
+const RECENT_PATHS_KEY = "insight-log:recent-paths";
+const RESTORE_DIR_KEY = "insight-log:restore-last-dir";
+const LAST_DIR_KEY = "insight-log:last-directory";
+const MAX_RECENT = 5;
+
+function loadRecentPaths(): string[] {
+  try {
+    const raw = localStorage.getItem(RECENT_PATHS_KEY);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed.filter((p) => typeof p === "string").slice(0, MAX_RECENT) : [];
+  } catch {
+    return [];
+  }
+}
+
+function saveRecentPaths(paths: string[]) {
+  localStorage.setItem(RECENT_PATHS_KEY, JSON.stringify(paths.slice(0, MAX_RECENT)));
+}
+
+function loadRestorePreference(): boolean {
+  const raw = localStorage.getItem(RESTORE_DIR_KEY);
+  if (raw === null) return true;
+  return raw === "true";
 }
 
 interface SearchResponse {
@@ -124,6 +164,9 @@ const App: React.FC = () => {
   const [collapsedFiles, setCollapsedFiles] = useState<Set<string>>(new Set());
   const [skippedFiles, setSkippedFiles] = useState<SkippedFileInfo[]>([]);
   const [isSkippedModalOpen, setIsSkippedModalOpen] = useState(false);
+  const [recentPaths, setRecentPaths] = useState<string[]>(() => loadRecentPaths());
+  const [restoreLastDir, setRestoreLastDir] = useState<boolean>(() => loadRestorePreference());
+  const [isDragging, setIsDragging] = useState(false);
 
   // Viewer states
   const [viewerState, setViewerState] = useState<{
@@ -150,6 +193,91 @@ const App: React.FC = () => {
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
   }, []);
+
+  const rememberDirectory = useCallback(async (dir: string, focusedFile?: string | null) => {
+    if (!dir) return;
+    try {
+      await invoke("set_search_root", { directory: dir });
+    } catch {
+      // ignore if command unavailable during early boot
+    }
+    setSearchParams((prev) => {
+      const next = { ...prev, directory: dir };
+      if (focusedFile) {
+        // Prefer focusing the dropped file via include glob when useful
+        return next;
+      }
+      return next;
+    });
+    if (focusedFile) {
+      setIncludeText(`**/${focusedFile}`);
+      setIsFilterOpen(true);
+    }
+    setRecentPaths((prev) => {
+      const next = [dir, ...prev.filter((p) => p !== dir)].slice(0, MAX_RECENT);
+      saveRecentPaths(next);
+      return next;
+    });
+    localStorage.setItem(LAST_DIR_KEY, dir);
+    setError(null);
+  }, []);
+
+  // Cold-start restore last directory
+  useEffect(() => {
+    if (!restoreLastDir) return;
+    const last = localStorage.getItem(LAST_DIR_KEY);
+    if (!last) return;
+    void (async () => {
+      try {
+        await invoke("set_search_root", { directory: last });
+        setSearchParams((prev) => ({ ...prev, directory: last }));
+      } catch {
+        // path may no longer exist
+      }
+    })();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Native drag-drop of folders / log archives
+  useEffect(() => {
+    let unlisten: (() => void) | undefined;
+    void (async () => {
+      try {
+        unlisten = await getCurrentWebview().onDragDropEvent(async (event) => {
+          if (event.payload.type === "enter" || event.payload.type === "over") {
+            setIsDragging(true);
+          } else if (event.payload.type === "leave") {
+            setIsDragging(false);
+          } else if (event.payload.type === "drop") {
+            setIsDragging(false);
+            const paths = event.payload.paths || [];
+            if (!paths.length) return;
+            try {
+              const info = await invoke<DroppedPathInfo>("resolve_dropped_path", {
+                droppedPath: paths[0],
+              });
+              await rememberDirectory(
+                info.root_directory,
+                info.is_directory ? null : info.file_name
+              );
+              message.success(
+                info.is_directory
+                  ? `已切换到目录: ${info.root_directory}`
+                  : `已定位到文件: ${info.file_name}`
+              );
+            } catch (err) {
+              message.error(`无法打开拖入路径: ${err}`);
+            }
+          }
+        });
+      } catch {
+        // browser / non-tauri env
+      }
+    })();
+    return () => {
+      if (unlisten) unlisten();
+    };
+  }, [rememberDirectory]);
 
   // Active filter count indicator
   const activeFiltersCount = useMemo(() => {
@@ -178,8 +306,7 @@ const App: React.FC = () => {
       setLoading(true);
       const result = await invoke<string | null>("select_directory");
       if (result) {
-        setSearchParams((prev) => ({ ...prev, directory: result }));
-        setError(null);
+        await rememberDirectory(result);
       }
     } catch (err) {
       setError(`选择目录时出错: ${err}`);
@@ -187,6 +314,49 @@ const App: React.FC = () => {
       setLoading(false);
     }
   };
+
+  const handlePickRecent = async (dir: string) => {
+    try {
+      await rememberDirectory(dir);
+      message.success(`已切换到: ${dir}`);
+    } catch (err) {
+      message.error(`无法打开目录: ${err}`);
+    }
+  };
+
+  const handleClearRecent = () => {
+    setRecentPaths([]);
+    saveRecentPaths([]);
+    message.info("已清除最近路径");
+  };
+
+  const recentMenuItems: MenuProps["items"] = [
+    ...recentPaths.map((p) => ({
+      key: p,
+      label: p,
+      onClick: () => void handlePickRecent(p),
+    })),
+    ...(recentPaths.length
+      ? [{ type: "divider" as const }, { key: "__clear__", label: "清除最近记录", danger: true, icon: <DeleteOutlined />, onClick: handleClearRecent }]
+      : [{ key: "__empty__", label: "暂无最近路径", disabled: true }]),
+    { type: "divider" as const },
+    {
+      key: "__restore__",
+      label: (
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12 }} onClick={(e) => e.stopPropagation()}>
+          <span>启动时恢复上次目录</span>
+          <Switch
+            size="small"
+            checked={restoreLastDir}
+            onChange={(checked) => {
+              setRestoreLastDir(checked);
+              localStorage.setItem(RESTORE_DIR_KEY, String(checked));
+            }}
+          />
+        </div>
+      ),
+    },
+  ];
 
   const handleSearch = useCallback(async () => {
     if (!searchParams.directory) {
@@ -350,7 +520,10 @@ const App: React.FC = () => {
   }, [fileGroups]);
 
   return (
-    <div className="app-container">
+    <div className={`app-container ${isDragging ? "is-dragging" : ""}`}>
+      {isDragging && (
+        <div className="drag-overlay">松开以设置为搜索根目录</div>
+      )}
       {/* Top Navigation Bar */}
       <header className="app-topbar">
         <div className="topbar-brand">
@@ -361,22 +534,32 @@ const App: React.FC = () => {
 
         <div className="topbar-center">
           {searchParams.directory ? (
-            <Tooltip title={`当前目录: ${searchParams.directory} (点击更换)`}>
-              <div className="directory-badge" onClick={handleDirectorySelect}>
-                <FolderOpenOutlined style={{ color: "#1677ff" }} />
-                <span className="directory-path">{searchParams.directory}</span>
-                <span style={{ fontSize: "11px", color: "#94a3b8" }}>更换</span>
-              </div>
-            </Tooltip>
+            <div className="directory-badge-group">
+              <Tooltip title={`当前目录: ${searchParams.directory} (点击更换)`}>
+                <div className="directory-badge" onClick={handleDirectorySelect}>
+                  <FolderOpenOutlined style={{ color: "#1677ff" }} />
+                  <span className="directory-path">{searchParams.directory}</span>
+                  <span style={{ fontSize: "11px", color: "#94a3b8" }}>更换</span>
+                </div>
+              </Tooltip>
+              <Dropdown menu={{ items: recentMenuItems }} trigger={["click"]} placement="bottomRight">
+                <Button size="small" type="text" icon={<HistoryOutlined />} className="recent-paths-btn" />
+              </Dropdown>
+            </div>
           ) : (
-            <Button
-              type="dashed"
-              size="small"
-              icon={<FolderOpenOutlined />}
-              onClick={handleDirectorySelect}
-            >
-              选择日志目录
-            </Button>
+            <div className="directory-badge-group">
+              <Button
+                type="dashed"
+                size="small"
+                icon={<FolderOpenOutlined />}
+                onClick={handleDirectorySelect}
+              >
+                选择日志目录
+              </Button>
+              <Dropdown menu={{ items: recentMenuItems }} trigger={["click"]} placement="bottomRight">
+                <Button size="small" type="text" icon={<HistoryOutlined />} className="recent-paths-btn" />
+              </Dropdown>
+            </div>
           )}
         </div>
 
@@ -639,7 +822,7 @@ const App: React.FC = () => {
                 <FolderOpenOutlined className="empty-state-icon" style={{ color: "#3b82f6" }} />
                 <div className="empty-state-title">请先选择日志工作目录</div>
                 <div className="empty-state-desc">
-                  支持普通文本日志以及 ZIP、TAR、GZ、7z 压缩包内容的快速检索与行级查看
+                  支持普通文本日志以及 ZIP、TAR、GZ、7z 压缩包内容的快速检索与行级查看。也可直接把文件夹或日志/归档拖入窗口。
                 </div>
                 <Button type="primary" icon={<FolderOpenOutlined />} onClick={handleDirectorySelect}>
                   选择日志目录

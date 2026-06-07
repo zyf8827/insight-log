@@ -643,3 +643,35 @@ body {
   color: #7c3aed !important;
   font-weight: 500;
 }
+
+
+/* Directory badge + recent paths */
+.directory-badge-group {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  max-width: 100%;
+}
+
+.recent-paths-btn {
+  color: var(--text-muted) !important;
+}
+
+.drag-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 9999;
+  background: rgba(22, 119, 255, 0.12);
+  border: 3px dashed var(--primary-color);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 18px;
+  font-weight: 600;
+  color: var(--primary-color);
+  pointer-events: none;
+}
+
+.app-container.is-dragging {
+  outline: none;
+}

@@ -7,7 +7,7 @@ use ignore::Walk;
 use rayon::prelude::*;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
-use crate::models::{SearchResult, SearchParams, SearchResponse, SkippedFileInfo};
+use crate::models::{SearchResult, SearchParams, SearchResponse, SkippedFileInfo, DroppedPathInfo};
 
 /// 应用程序全局状态，用于控制安全根目录范围，防止任意路径读取与路径穿越
 pub struct AppState {
@@ -489,6 +489,54 @@ fn is_useless_file(file_path: &Path) -> bool {
     archive::is_useless_file_by_name(&file_name)
 }
 
+/// 解析用户拖入的文件或目录路径，自动设置工作根目录并识别文件类型
+#[tauri::command]
+async fn resolve_dropped_path(
+    dropped_path: String,
+    state: tauri::State<'_, AppState>,
+) -> Result<DroppedPathInfo, String> {
+    let path = Path::new(&dropped_path);
+    if !path.exists() {
+        return Err(format!("路径不存在: {}", dropped_path));
+    }
+
+    let canon = path.canonicalize().map_err(|e| format!("路径解析失败: {}", e))?;
+    if canon.is_dir() {
+        state.set_root(&canon);
+        Ok(DroppedPathInfo {
+            root_directory: canon.display().to_string(),
+            is_directory: true,
+            file_name: None,
+            is_archive: false,
+        })
+    } else {
+        let parent = canon.parent().unwrap_or(&canon);
+        state.set_root(parent);
+        let is_archive = archive::detect_archive_type(&canon).is_some();
+        let file_name = canon.file_name().map(|f| f.to_string_lossy().to_string());
+        Ok(DroppedPathInfo {
+            root_directory: parent.display().to_string(),
+            is_directory: false,
+            file_name,
+            is_archive,
+        })
+    }
+}
+
+/// 显式设置当前允许的安全工作根目录
+#[tauri::command]
+async fn set_search_root(
+    directory: String,
+    state: tauri::State<'_, AppState>,
+) -> Result<(), String> {
+    let path = Path::new(&directory);
+    if !path.exists() || !path.is_dir() {
+        return Err("目录不存在".to_string());
+    }
+    state.set_root(path);
+    Ok(())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -502,7 +550,9 @@ pub fn run() {
             get_directory_structure,
             get_file_info,
             get_archive_contents,
-            read_archive_file_content
+            read_archive_file_content,
+            resolve_dropped_path,
+            set_search_root
         ])
         .run(tauri::generate_context!())
         .expect("运行 Tauri 应用时出错");
