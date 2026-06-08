@@ -31,6 +31,9 @@ import {
   CloseOutlined,
   HistoryOutlined,
   DeleteOutlined,
+  CopyOutlined,
+  ExportOutlined,
+  LinkOutlined
 } from "@ant-design/icons";
 import { useVirtualizer } from "@tanstack/react-virtual";
 
@@ -133,6 +136,47 @@ type FlatItem =
       isFirstInFile: boolean;
       isLastInFile: boolean;
     };
+
+
+function formatBlockMarkdown(filePath: string, block: MergedSearchResult): string {
+  const body = block.lines.map((l) => l.content).join("\n");
+  return `> ${filePath}:${block.start_line}-${block.end_line}\n\`\`\`log\n${body}\n\`\`\`\n`;
+}
+
+function formatResultsMarkdown(groups: FileGroup[]): string {
+  const parts: string[] = ["# Insight Log 搜索结果导出", ""];
+  for (const g of groups) {
+    parts.push(`## ${g.filePath}`, "");
+    for (const block of g.blocks) {
+      parts.push(formatBlockMarkdown(g.filePath, block));
+    }
+  }
+  return parts.join("\n");
+}
+
+function formatResultsPlain(groups: FileGroup[]): string {
+  const parts: string[] = [];
+  for (const g of groups) {
+    parts.push(`===== ${g.filePath} =====`);
+    for (const block of g.blocks) {
+      parts.push(`--- lines ${block.start_line}-${block.end_line} ---`);
+      for (const line of block.lines) {
+        parts.push(`${line.line_number}| ${line.content}`);
+      }
+      parts.push("");
+    }
+  }
+  return parts.join("\n");
+}
+
+async function copyText(text: string, okMsg: string) {
+  try {
+    await navigator.clipboard.writeText(text);
+    message.success(okMsg);
+  } catch (err) {
+    message.error(`复制失败: ${err}`);
+  }
+}
 
 const App: React.FC = () => {
   const [searchParams, setSearchParams] = useState<SearchParams>({
@@ -442,6 +486,33 @@ const App: React.FC = () => {
   const handleExpandAll = () => {
     setCollapsedFiles(new Set());
   };
+
+  const handleExportResults = async (format: "md" | "txt") => {
+    if (fileGroups.length === 0) {
+      message.warning("当前没有可导出的结果");
+      return;
+    }
+    const content =
+      format === "md" ? formatResultsMarkdown(fileGroups) : formatResultsPlain(fileGroups);
+    const defaultName =
+      format === "md" ? "insight-log-results.md" : "insight-log-results.txt";
+    try {
+      const saved = await invoke<string | null>("save_text_file", {
+        defaultName,
+        content,
+      });
+      if (saved) {
+        message.success(`已导出到: ${saved}`);
+      }
+    } catch (err) {
+      message.error(`导出失败: ${err}`);
+    }
+  };
+
+  const exportMenuItems: MenuProps["items"] = [
+    { key: "md", label: "导出为 Markdown (.md)", onClick: () => void handleExportResults("md") },
+    { key: "txt", label: "导出为纯文本 (.txt)", onClick: () => void handleExportResults("txt") },
+  ];
 
   // Group and secondary filter
   const fileGroups = useMemo<FileGroup[]>(() => {
@@ -782,7 +853,7 @@ const App: React.FC = () => {
                   </Tooltip>
                 )}
                 {fileGroups.length > 0 && (
-                  <span style={{ marginLeft: 6, display: "flex", gap: 6 }}>
+                  <span style={{ marginLeft: 6, display: "flex", gap: 6, alignItems: "center" }}>
                     <Button type="link" size="small" style={{ padding: 0 }} onClick={handleCollapseAll}>
                       全部折叠
                     </Button>
@@ -790,6 +861,12 @@ const App: React.FC = () => {
                     <Button type="link" size="small" style={{ padding: 0 }} onClick={handleExpandAll}>
                       全部展开
                     </Button>
+                    <span style={{ color: "#cbd5e1" }}>|</span>
+                    <Dropdown menu={{ items: exportMenuItems }} placement="bottomRight">
+                      <Button type="link" size="small" style={{ padding: 0 }} icon={<ExportOutlined />}>
+                        导出
+                      </Button>
+                    </Dropdown>
                   </span>
                 )}
               </div>
@@ -907,6 +984,19 @@ const App: React.FC = () => {
                           </div>
 
                           <div className="file-header-actions">
+                            <Tooltip title="复制文件路径">
+                              <Button
+                                type="text"
+                                size="small"
+                                icon={<LinkOutlined />}
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  void copyText(item.filePath, "路径已复制");
+                                }}
+                              >
+                                复制路径
+                              </Button>
+                            </Tooltip>
                             <Tooltip title="在完整查看器中浏览此文件">
                               <Button
                                 type="text"
@@ -948,20 +1038,36 @@ const App: React.FC = () => {
                           <span className="block-line-range">
                             第 {item.block.start_line} - {item.block.end_line} 行
                           </span>
-                          <Button
-                            type="link"
-                            size="small"
-                            style={{ fontSize: 11, padding: 0 }}
-                            onClick={() => {
-                              setViewerState({
-                                visible: true,
-                                filePath: item.filePath,
-                                initialLine: item.block.start_line,
-                              });
-                            }}
-                          >
-                            定位查看
-                          </Button>
+                          <span style={{ display: "flex", gap: 8, alignItems: "center" }}>
+                            <Button
+                              type="link"
+                              size="small"
+                              style={{ fontSize: 11, padding: 0 }}
+                              icon={<CopyOutlined />}
+                              onClick={() => {
+                                void copyText(
+                                  formatBlockMarkdown(item.filePath, item.block),
+                                  "匹配块已复制为 Markdown"
+                                );
+                              }}
+                            >
+                              复制
+                            </Button>
+                            <Button
+                              type="link"
+                              size="small"
+                              style={{ fontSize: 11, padding: 0 }}
+                              onClick={() => {
+                                setViewerState({
+                                  visible: true,
+                                  filePath: item.filePath,
+                                  initialLine: item.block.start_line,
+                                });
+                              }}
+                            >
+                              定位查看
+                            </Button>
+                          </span>
                         </div>
 
                         <pre className="log-snippet">

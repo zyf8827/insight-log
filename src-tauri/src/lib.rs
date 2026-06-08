@@ -416,6 +416,38 @@ async fn search_logs(
     })
 }
 
+
+/// 弹出保存对话框并将文本写入用户选定的文件
+#[tauri::command]
+async fn save_text_file(
+    app_handle: tauri::AppHandle,
+    default_name: String,
+    content: String,
+) -> Result<Option<String>, String> {
+    use tauri_plugin_dialog::DialogExt;
+    use tokio::sync::oneshot;
+
+    let (sender, receiver) = oneshot::channel();
+    app_handle
+        .dialog()
+        .file()
+        .set_file_name(&default_name)
+        .add_filter("Markdown", &["md"])
+        .add_filter("Text", &["txt"])
+        .save_file(move |result| {
+            let selected = result.map(|path| path.to_string());
+            let _ = sender.send(selected);
+        });
+
+    let selected = receiver.await.map_err(|e| format!("保存对话框失败: {}", e))?;
+    let Some(path_str) = selected else {
+        return Ok(None);
+    };
+
+    std::fs::write(Path::new(&path_str), content).map_err(|e| format!("写入文件失败: {}", e))?;
+    Ok(Some(path_str))
+}
+
 /// 选择目录的函数
 #[tauri::command]
 async fn select_directory(
@@ -552,7 +584,8 @@ pub fn run() {
             get_archive_contents,
             read_archive_file_content,
             resolve_dropped_path,
-            set_search_root
+            set_search_root,
+            save_text_file
         ])
         .run(tauri::generate_context!())
         .expect("运行 Tauri 应用时出错");
