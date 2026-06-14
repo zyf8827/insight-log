@@ -1,8 +1,8 @@
-import { useState, useEffect, useMemo } from 'react';
+import { useState, useEffect, useMemo, useRef } from 'react';
 import { Modal, Spin, message, Button, Space } from 'antd';
 import CodeMirror from '@uiw/react-codemirror';
 import { lineNumbers, EditorView, Decoration, type DecorationSet, ViewPlugin, type ViewUpdate } from '@codemirror/view';
-import { RangeSetBuilder } from '@codemirror/state';
+import { RangeSetBuilder, StateEffect, StateField } from '@codemirror/state';
 import { invoke } from '@tauri-apps/api/core';
 
 type FileViewerProps = {
@@ -10,6 +10,9 @@ type FileViewerProps = {
   onClose: () => void;
   filePath: string | null;
   initialLine: number | null;
+  query?: string;
+  isRegex?: boolean;
+  caseSensitive?: boolean;
 };
 
 type LoadedRange = {
@@ -63,8 +66,90 @@ const logSyntaxHighlighter = ViewPlugin.fromClass(
   }
 );
 
-export default function FileViewer({ visible, onClose, filePath, initialLine }: FileViewerProps) {
+
+
+const setPulseLine = StateEffect.define<number | null>();
+const pulseField = StateField.define<DecorationSet>({
+  create: () => Decoration.none,
+  update(deco, tr) {
+    deco = deco.map(tr.changes);
+    for (const e of tr.effects) {
+      if (e.is(setPulseLine)) {
+        if (e.value == null) {
+          deco = Decoration.none;
+        } else {
+          const line = tr.state.doc.line(e.value);
+          deco = Decoration.set([Decoration.line({ class: "cm-pulse-line" }).range(line.from)]);
+        }
+      }
+    }
+    return deco;
+  },
+  provide: (f) => EditorView.decorations.from(f),
+});
+
+const pulseLineTheme = EditorView.baseTheme({
+  ".cm-pulse-line": {
+    backgroundColor: "rgba(250, 204, 21, 0.45)",
+    transition: "background-color 1.2s ease-out",
+  },
+  ".cm-search-hit": {
+    backgroundColor: "#fde047",
+    borderRadius: "2px",
+  },
+});
+
+function buildQueryHighlighter(query: string, isRegex: boolean, caseSensitive: boolean) {
+  return ViewPlugin.fromClass(
+    class {
+      decorations: DecorationSet;
+      constructor(view: EditorView) {
+        this.decorations = this.build(view);
+      }
+      update(update: ViewUpdate) {
+        if (update.docChanged || update.viewportChanged) {
+          this.decorations = this.build(update.view);
+        }
+      }
+      build(view: EditorView) {
+        const builder = new RangeSetBuilder<Decoration>();
+        const deco = Decoration.mark({ class: "cm-search-hit" });
+        if (!query.trim()) return builder.finish();
+        let regex: RegExp | null = null;
+        try {
+          if (isRegex) {
+            regex = new RegExp(query, caseSensitive ? "g" : "gi");
+          } else {
+            const escaped = query.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+            regex = new RegExp(escaped, caseSensitive ? "g" : "gi");
+          }
+        } catch {
+          return builder.finish();
+        }
+        for (const { from, to } of view.visibleRanges) {
+          const text = view.state.doc.sliceString(from, to);
+          regex.lastIndex = 0;
+          let match: RegExpExecArray | null;
+          while ((match = regex.exec(text)) !== null) {
+            if (match[0].length === 0) {
+              regex.lastIndex++;
+              continue;
+            }
+            const start = from + match.index;
+            builder.add(start, start + match[0].length, deco);
+          }
+        }
+        return builder.finish();
+      }
+    },
+    { decorations: (v) => v.decorations }
+  );
+}
+
+export default function FileViewer({ visible, onClose, filePath, initialLine, query = '', isRegex = false, caseSensitive = false }: FileViewerProps) {
   const [loadedRanges, setLoadedRanges] = useState<LoadedRange[]>([]);
+  const editorViewRef = useRef<EditorView | null>(null);
+  const didScrollRef = useRef(false);
   const [loading, setLoading] = useState(false);
   const [totalLines, setTotalLines] = useState(0);
   const maxLinesPerLoad = 1000;
@@ -208,8 +293,46 @@ export default function FileViewer({ visible, onClose, filePath, initialLine }: 
         },
       }),
       logSyntaxHighlighter,
+      buildQueryHighlighter(query, isRegex, caseSensitive),
+      pulseLineTheme,
+      pulseField,
+      EditorView.updateListener.of((update) => {
+        editorViewRef.current = update.view;
+      }),
     ];
-  }, [lineIndexToPhysicalLine]);
+  }, [lineIndexToPhysicalLine, query, isRegex, caseSensitive]);
+
+  // Scroll to initial line and pulse once content is ready
+  useEffect(() => {
+    if (!visible) {
+      didScrollRef.current = false;
+      return;
+    }
+    if (didScrollRef.current || !initialLine || loadedRanges.length === 0) return;
+
+    const timer = window.setTimeout(() => {
+      const view = editorViewRef.current;
+      if (!view) return;
+      const docLineIndex = lineIndexToPhysicalLine.findIndex((n) => n === initialLine);
+      if (docLineIndex < 0) return;
+      const cmLine = docLineIndex + 1;
+      if (cmLine < 1 || cmLine > view.state.doc.lines) return;
+      const line = view.state.doc.line(cmLine);
+      view.dispatch({
+        selection: { anchor: line.from },
+        effects: [
+          EditorView.scrollIntoView(line.from, { y: "center" }),
+          setPulseLine.of(cmLine),
+        ],
+      });
+      window.setTimeout(() => {
+        editorViewRef.current?.dispatch({ effects: setPulseLine.of(null) });
+      }, 1400);
+      didScrollRef.current = true;
+    }, 80);
+
+    return () => window.clearTimeout(timer);
+  }, [visible, initialLine, loadedRanges, lineIndexToPhysicalLine, combinedContent]);
 
   // Load previous 1000 lines
   const loadPrevious = () => {

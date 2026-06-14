@@ -1099,6 +1099,9 @@ const App: React.FC = () => {
         onClose={() => setViewerState({ visible: false, filePath: null, initialLine: null })}
         filePath={viewerState.filePath}
         initialLine={viewerState.initialLine}
+        query={searchParams.query}
+        isRegex={searchParams.is_regex}
+        caseSensitive={searchParams.case_sensitive}
       />
 
       {/* Full File Viewer (From FileTree or Header Action) */}
