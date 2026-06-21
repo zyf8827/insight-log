@@ -37,8 +37,7 @@ import {
 } from "@ant-design/icons";
 import { useVirtualizer } from "@tanstack/react-virtual";
 
-import FileViewer from "./FileViewer";
-import FileViewerFull from "./FileViewerFull";
+import LogDetailViewer from "./LogDetailViewer";
 import FileTree from "./FileTree";
 import "./App.css";
 
@@ -212,17 +211,12 @@ const App: React.FC = () => {
   const [restoreLastDir, setRestoreLastDir] = useState<boolean>(() => loadRestorePreference());
   const [isDragging, setIsDragging] = useState(false);
 
-  // Viewer states
+  // Unified detail viewer
   const [viewerState, setViewerState] = useState<{
     visible: boolean;
     filePath: string | null;
     initialLine: number | null;
   }>({ visible: false, filePath: null, initialLine: null });
-
-  const [fileViewerState, setFileViewerState] = useState<{
-    visible: boolean;
-    filePath: string | null;
-  }>({ visible: false, filePath: null });
 
   const searchInputRef = useRef<InputRef>(null);
   const viewportRef = useRef<HTMLDivElement>(null);
@@ -666,7 +660,7 @@ const App: React.FC = () => {
             <FileTree
               directory={searchParams.directory}
               onFileDoubleClick={(filePath) => {
-                setFileViewerState({ visible: true, filePath });
+                setViewerState({ visible: true, filePath, initialLine: null });
               }}
             />
           </div>
@@ -1004,9 +998,10 @@ const App: React.FC = () => {
                                 icon={<EyeOutlined />}
                                 onClick={(e) => {
                                   e.stopPropagation();
-                                  setFileViewerState({
+                                  setViewerState({
                                     visible: true,
                                     filePath: item.filePath,
+                                    initialLine: null,
                                   });
                                 }}
                               >
@@ -1093,8 +1088,7 @@ const App: React.FC = () => {
         </main>
       </div>
 
-      {/* Target Result Viewer */}
-      <FileViewer
+      <LogDetailViewer
         visible={viewerState.visible}
         onClose={() => setViewerState({ visible: false, filePath: null, initialLine: null })}
         filePath={viewerState.filePath}
@@ -1102,13 +1096,6 @@ const App: React.FC = () => {
         query={searchParams.query}
         isRegex={searchParams.is_regex}
         caseSensitive={searchParams.case_sensitive}
-      />
-
-      {/* Full File Viewer (From FileTree or Header Action) */}
-      <FileViewerFull
-        visible={fileViewerState.visible}
-        onClose={() => setFileViewerState({ visible: false, filePath: null })}
-        filePath={fileViewerState.filePath}
       />
 
       {/* Skipped Oversized / Corrupted Files Modal */}
