@@ -14,6 +14,8 @@ import {
   message,
   type InputRef,
   type MenuProps,
+  ConfigProvider,
+  theme as antdTheme,
 } from "antd";
 import {
   FolderOpenOutlined,
@@ -33,7 +35,10 @@ import {
   DeleteOutlined,
   CopyOutlined,
   ExportOutlined,
-  LinkOutlined
+  LinkOutlined,
+  BulbOutlined,
+  MoonOutlined,
+  DesktopOutlined
 } from "@ant-design/icons";
 import { useVirtualizer } from "@tanstack/react-virtual";
 
@@ -177,19 +182,63 @@ async function copyText(text: string, okMsg: string) {
   }
 }
 
+
+type ThemeMode = "light" | "dark" | "system";
+
+const PREFS_KEY = "insight-log:search-prefs";
+
+type PersistedPrefs = {
+  max_results?: number;
+  includeText?: string;
+  excludeText?: string;
+  case_sensitive?: boolean;
+  is_regex?: boolean;
+  theme?: ThemeMode;
+  restoreLastDir?: boolean;
+};
+
+function loadPrefs(): PersistedPrefs {
+  try {
+    const raw = localStorage.getItem(PREFS_KEY);
+    if (!raw) return {};
+    return JSON.parse(raw) as PersistedPrefs;
+  } catch {
+    return {};
+  }
+}
+
+function savePrefs(partial: PersistedPrefs) {
+  const next = { ...loadPrefs(), ...partial };
+  localStorage.setItem(PREFS_KEY, JSON.stringify(next));
+}
+
+function resolveTheme(mode: ThemeMode): "light" | "dark" {
+  if (mode === "system") {
+    return window.matchMedia("(prefers-color-scheme: dark)").matches
+      ? "dark"
+      : "light";
+  }
+  return mode;
+}
+
 const App: React.FC = () => {
+  const initialPrefs = useMemo(() => loadPrefs(), []);
   const [searchParams, setSearchParams] = useState<SearchParams>({
     directory: "",
     query: "",
-    case_sensitive: false,
-    is_regex: false,
+    case_sensitive: initialPrefs.case_sensitive ?? false,
+    is_regex: initialPrefs.is_regex ?? false,
     include_patterns: [],
     exclude_patterns: [],
-    max_results: 200,
+    max_results: initialPrefs.max_results ?? 200,
   });
 
-  const [includeText, setIncludeText] = useState("");
-  const [excludeText, setExcludeText] = useState("");
+  const [includeText, setIncludeText] = useState(initialPrefs.includeText ?? "");
+  const [excludeText, setExcludeText] = useState(initialPrefs.excludeText ?? "");
+  const [themeMode, setThemeMode] = useState<ThemeMode>(initialPrefs.theme ?? "system");
+  const [resolvedTheme, setResolvedTheme] = useState<"light" | "dark">(() =>
+    resolveTheme(initialPrefs.theme ?? "system")
+  );
   const [isFilterOpen, setIsFilterOpen] = useState(false);
   const [isSidebarOpen, setIsSidebarOpen] = useState(false);
 
@@ -316,6 +365,43 @@ const App: React.FC = () => {
       if (unlisten) unlisten();
     };
   }, [rememberDirectory]);
+
+  // Persist search preferences
+  useEffect(() => {
+    savePrefs({
+      max_results: searchParams.max_results,
+      includeText,
+      excludeText,
+      case_sensitive: searchParams.case_sensitive,
+      is_regex: searchParams.is_regex,
+      theme: themeMode,
+      restoreLastDir,
+    });
+  }, [
+    searchParams.max_results,
+    searchParams.case_sensitive,
+    searchParams.is_regex,
+    includeText,
+    excludeText,
+    themeMode,
+    restoreLastDir,
+  ]);
+
+  // Apply theme to document + antd
+  useEffect(() => {
+    const apply = () => {
+      const next = resolveTheme(themeMode);
+      setResolvedTheme(next);
+      document.documentElement.setAttribute("data-theme", next);
+    };
+    apply();
+    if (themeMode !== "system") return;
+    const mq = window.matchMedia("(prefers-color-scheme: dark)");
+    const handler = () => apply();
+    mq.addEventListener("change", handler);
+    return () => mq.removeEventListener("change", handler);
+  }, [themeMode]);
+
 
   // Active filter count indicator
   const activeFiltersCount = useMemo(() => {
@@ -585,6 +671,14 @@ const App: React.FC = () => {
   }, [fileGroups]);
 
   return (
+    <ConfigProvider
+      theme={{
+        algorithm:
+          resolvedTheme === "dark"
+            ? antdTheme.darkAlgorithm
+            : antdTheme.defaultAlgorithm,
+      }}
+    >
     <div className={`app-container ${isDragging ? "is-dragging" : ""}`}>
       {isDragging && (
         <div className="drag-overlay">松开以设置为搜索根目录</div>
@@ -629,6 +723,24 @@ const App: React.FC = () => {
         </div>
 
         <div className="topbar-actions">
+          <Dropdown
+            menu={{
+              items: [
+                { key: "light", label: "浅色", icon: <BulbOutlined />, onClick: () => setThemeMode("light") },
+                { key: "dark", label: "深色", icon: <MoonOutlined />, onClick: () => setThemeMode("dark") },
+                { key: "system", label: "跟随系统", icon: <DesktopOutlined />, onClick: () => setThemeMode("system") },
+              ],
+              selectedKeys: [themeMode],
+            }}
+            placement="bottomRight"
+          >
+            <Button
+              size="small"
+              icon={resolvedTheme === "dark" ? <MoonOutlined /> : <BulbOutlined />}
+            >
+              主题
+            </Button>
+          </Dropdown>
           <Tooltip title={isSidebarOpen ? "收起文件树" : "展开文件树浏览"}>
             <Button
               size="small"
@@ -1139,6 +1251,7 @@ const App: React.FC = () => {
         </div>
       </Modal>
     </div>
+    </ConfigProvider>
   );
 };
 

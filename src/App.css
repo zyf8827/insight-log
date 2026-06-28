@@ -675,3 +675,45 @@ body {
 .app-container.is-dragging {
   outline: none;
 }
+
+
+/* Dark theme */
+[data-theme="dark"] {
+  --app-bg: #0f172a;
+  --surface-bg: #1e293b;
+  --border-color: #334155;
+  --border-subtle: #1e293b;
+  --text-primary: #e2e8f0;
+  --text-secondary: #94a3b8;
+  --text-muted: #64748b;
+  --primary-color: #3b82f6;
+  --primary-hover: #60a5fa;
+  --primary-subtle: #1e3a5f;
+  --match-bg: #422006;
+  --match-mark: #ca8a04;
+  --match-text: #fde68a;
+}
+
+[data-theme="dark"] .app-topbar,
+[data-theme="dark"] .file-group-header,
+[data-theme="dark"] .match-block,
+[data-theme="dark"] .search-hero,
+[data-theme="dark"] .results-summary-bar,
+[data-theme="dark"] .filter-panel {
+  background-color: var(--surface-bg);
+  border-color: var(--border-color);
+}
+
+[data-theme="dark"] .log-line--match {
+  background: var(--match-bg);
+}
+
+[data-theme="dark"] .search-highlight {
+  background: var(--match-mark);
+  color: #1c1917;
+}
+
+[data-theme="dark"] .cm-log-error { color: #f87171; }
+[data-theme="dark"] .cm-log-warn { color: #fbbf24; }
+[data-theme="dark"] .cm-log-info { color: #38bdf8; }
+[data-theme="dark"] .cm-log-debug { color: #94a3b8; }
