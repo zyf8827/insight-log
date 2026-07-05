@@ -115,6 +115,7 @@ interface SearchResponse {
   elapsed_ms?: number;
   is_truncated?: boolean;
   skipped_files?: SkippedFileInfo[];
+  cancelled?: boolean;
 }
 
 interface FileGroup {
@@ -256,6 +257,7 @@ const App: React.FC = () => {
   const [collapsedFiles, setCollapsedFiles] = useState<Set<string>>(new Set());
   const [skippedFiles, setSkippedFiles] = useState<SkippedFileInfo[]>([]);
   const [isSkippedModalOpen, setIsSkippedModalOpen] = useState(false);
+  const [searchCancelled, setSearchCancelled] = useState(false);
   const [recentPaths, setRecentPaths] = useState<string[]>(() => loadRecentPaths());
   const [restoreLastDir, setRestoreLastDir] = useState<boolean>(() => loadRestorePreference());
   const [isDragging, setIsDragging] = useState(false);
@@ -499,6 +501,7 @@ const App: React.FC = () => {
     try {
       setLoading(true);
       setError(null);
+      setSearchCancelled(false);
 
       const parsedIncludes = includeText
         .split(",")
@@ -524,6 +527,7 @@ const App: React.FC = () => {
         totalCount: response.total_count,
       });
       setSkippedFiles(response.skipped_files || []);
+      setSearchCancelled(!!response.cancelled);
       setHasSearched(true);
       setCollapsedFiles(new Set()); // reset collapsed state for new search
     } catch (err) {
@@ -531,7 +535,17 @@ const App: React.FC = () => {
     } finally {
       setLoading(false);
     }
-  }, [searchParams, includeText, excludeText]);
+  }, [searchParams, includeText, excludeText, regexError]);
+
+  const handleCancelSearch = useCallback(async () => {
+    try {
+      await invoke("cancel_search");
+      setSearchCancelled(true);
+      message.info("正在停止搜索…");
+    } catch (err) {
+      message.error(`停止失败: ${err}`);
+    }
+  }, []);
 
   const handleClear = () => {
     setSearchParams((prev) => ({
@@ -544,6 +558,7 @@ const App: React.FC = () => {
     setSecondaryFilter("");
     setSearchStats({});
     setSkippedFiles([]);
+    setSearchCancelled(false);
   };
 
   const toggleFileCollapse = (filePath: string) => {
@@ -848,17 +863,28 @@ const App: React.FC = () => {
                 )}
               </div>
 
-              <Button
-                type="primary"
-                size="large"
-                icon={<SearchOutlined />}
-                loading={loading}
-                disabled={!searchParams.directory || !searchParams.query.trim() || !!regexError}
-                onClick={handleSearch}
-                style={{ fontWeight: 600, padding: "0 22px" }}
-              >
-                搜索
-              </Button>
+              {loading ? (
+                <Button
+                  danger
+                  type="primary"
+                  size="large"
+                  onClick={() => void handleCancelSearch()}
+                  style={{ fontWeight: 600, padding: "0 22px" }}
+                >
+                  停止
+                </Button>
+              ) : (
+                <Button
+                  type="primary"
+                  size="large"
+                  icon={<SearchOutlined />}
+                  disabled={!searchParams.directory || !searchParams.query.trim() || !!regexError}
+                  onClick={handleSearch}
+                  style={{ fontWeight: 600, padding: "0 22px" }}
+                >
+                  搜索
+                </Button>
+              )}
 
               <Button
                 size="large"
@@ -941,7 +967,12 @@ const App: React.FC = () => {
                     耗时: <span className="stat-value">{searchStats.elapsedMs} ms</span>
                   </span>
                 )}
-                {searchStats.isTruncated && (
+                {searchCancelled && (
+                  <span className="stat-badge-truncated" style={{ background: "#fee2e2", color: "#b91c1c" }}>
+                    已取消 — 显示停止前已收集的结果
+                  </span>
+                )}
+                {searchStats.isTruncated && !searchCancelled && (
                   <span className="stat-badge-truncated">
                     已达上限 {searchParams.max_results} 条 (部分结果已截断)
                   </span>

@@ -6,19 +6,33 @@ mod file_ops;
 use ignore::Walk;
 use rayon::prelude::*;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, atomic::{AtomicBool, Ordering}};
 use crate::models::{SearchResult, SearchParams, SearchResponse, SkippedFileInfo, DroppedPathInfo};
 
 /// 应用程序全局状态，用于控制安全根目录范围，防止任意路径读取与路径穿越
 pub struct AppState {
     pub allowed_root: Mutex<Option<PathBuf>>,
+    pub cancel_flag: Arc<AtomicBool>,
 }
 
 impl AppState {
     pub fn new() -> Self {
         Self {
             allowed_root: Mutex::new(None),
+            cancel_flag: Arc::new(AtomicBool::new(false)),
         }
+    }
+
+    pub fn request_cancel(&self) {
+        self.cancel_flag.store(true, Ordering::SeqCst);
+    }
+
+    pub fn reset_cancel(&self) {
+        self.cancel_flag.store(false, Ordering::SeqCst);
+    }
+
+    pub fn is_cancelled(&self) -> bool {
+        self.cancel_flag.load(Ordering::SeqCst)
     }
 
     pub fn set_root(&self, path: &Path) {
@@ -305,6 +319,12 @@ async fn search_logs(
 
     // 设置当前合法搜索根目录
     state.set_root(directory);
+    state.reset_cancel();
+    let cancel_flag = Arc::clone(&state.cancel_flag);
+    let hit_counter = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let max_results = search_params.max_results;
+    // Soft cap: stop walking once we have collected a small redundancy over max_results
+    let soft_cap = max_results.saturating_mul(2).max(max_results + 50);
 
     let pattern_strings = search::parse_query_mode(&search_params.query, search_params.is_regex);
     if pattern_strings.is_empty() {
@@ -325,7 +345,15 @@ async fn search_logs(
             let compiled_patterns = Arc::clone(&compiled_patterns);
             let include_patterns = Arc::clone(&include_patterns);
             let exclude_patterns = Arc::clone(&exclude_patterns);
+            let cancel_flag = Arc::clone(&cancel_flag);
+            let hit_counter = Arc::clone(&hit_counter);
             move |entry| {
+                if cancel_flag.load(Ordering::Relaxed) {
+                    return None;
+                }
+                if hit_counter.load(Ordering::Relaxed) >= soft_cap {
+                    return None;
+                }
                 let mut local_skipped = Vec::new();
                 let entry = match entry {
                     Ok(e) => e,
@@ -379,6 +407,9 @@ async fn search_logs(
                     }
                 };
 
+                if !results.is_empty() {
+                    hit_counter.fetch_add(results.len(), Ordering::Relaxed);
+                }
                 if results.is_empty() && local_skipped.is_empty() {
                     None
                 } else {
@@ -394,6 +425,9 @@ async fn search_logs(
                 acc
             },
         );
+
+    let was_cancelled = cancel_flag.load(Ordering::SeqCst);
+    state.reset_cancel();
 
     all_results.sort_by(|a, b| {
         a.file_path
@@ -411,11 +445,19 @@ async fn search_logs(
         results: merged_results,
         total_count: total_matches,
         elapsed_ms,
-        is_truncated,
+        is_truncated: is_truncated || was_cancelled,
         skipped_files,
+        cancelled: was_cancelled,
     })
 }
 
+
+/// 取消正在进行的搜索
+#[tauri::command]
+async fn cancel_search(state: tauri::State<'_, AppState>) -> Result<(), String> {
+    state.request_cancel();
+    Ok(())
+}
 
 /// 弹出保存对话框并将文本写入用户选定的文件
 #[tauri::command]
@@ -585,7 +627,8 @@ pub fn run() {
             read_archive_file_content,
             resolve_dropped_path,
             set_search_root,
-            save_text_file
+            save_text_file,
+            cancel_search
         ])
         .run(tauri::generate_context!())
         .expect("运行 Tauri 应用时出错");

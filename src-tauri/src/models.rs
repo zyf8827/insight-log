@@ -52,6 +52,8 @@ pub struct SearchResponse {
     pub is_truncated: bool,
     #[serde(default)]
     pub skipped_files: Vec<SkippedFileInfo>,
+    #[serde(default)]
+    pub cancelled: bool,
 }
 
 #[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq)]
