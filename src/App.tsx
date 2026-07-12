@@ -258,6 +258,7 @@ const App: React.FC = () => {
   const [skippedFiles, setSkippedFiles] = useState<SkippedFileInfo[]>([]);
   const [isSkippedModalOpen, setIsSkippedModalOpen] = useState(false);
   const [searchCancelled, setSearchCancelled] = useState(false);
+  const [activeBlockKey, setActiveBlockKey] = useState<string | null>(null);
   const [recentPaths, setRecentPaths] = useState<string[]>(() => loadRecentPaths());
   const [restoreLastDir, setRestoreLastDir] = useState<boolean>(() => loadRestorePreference());
   const [isDragging, setIsDragging] = useState(false);
@@ -530,6 +531,7 @@ const App: React.FC = () => {
       setSearchCancelled(!!response.cancelled);
       setHasSearched(true);
       setCollapsedFiles(new Set()); // reset collapsed state for new search
+      setActiveBlockKey(null);
     } catch (err) {
       setError(`搜索出错: ${err}`);
     } finally {
@@ -676,6 +678,102 @@ const App: React.FC = () => {
     },
     overscan: 6,
   });
+
+
+  // Keyboard navigation across result blocks
+  useEffect(() => {
+    const isTypingTarget = (el: EventTarget | null) => {
+      if (!(el instanceof HTMLElement)) return false;
+      const tag = el.tagName.toLowerCase();
+      if (tag === "input" || tag === "textarea" || el.isContentEditable) return true;
+      return !!el.closest(".ant-input, .ant-input-number, .cm-editor, [contenteditable=true]");
+    };
+
+    const blockKeys = flatItems.filter((i) => i.type === "block").map((i) => i.key);
+
+    const handleKeyDown = (e: KeyboardEvent) => {
+      // Esc: close viewer first, else clear secondary filter / blur
+      if (e.key === "Escape") {
+        if (viewerState.visible) {
+          e.preventDefault();
+          setViewerState({ visible: false, filePath: null, initialLine: null });
+          return;
+        }
+        if (isSkippedModalOpen) {
+          e.preventDefault();
+          setIsSkippedModalOpen(false);
+          return;
+        }
+        if (secondaryFilter) {
+          e.preventDefault();
+          setSecondaryFilter("");
+          return;
+        }
+        if (document.activeElement instanceof HTMLElement) {
+          document.activeElement.blur();
+        }
+        return;
+      }
+
+      if (!blockKeys.length) return;
+
+      const typing = isTypingTarget(e.target);
+      // Arrow keys: allow even from input if not composing query? Prompt: don't hijack letters when in input
+      const isNavKey =
+        e.key === "ArrowDown" ||
+        e.key === "ArrowUp" ||
+        e.key === "Enter" ||
+        (!typing && (e.key === "j" || e.key === "k"));
+
+      if (!isNavKey) return;
+      if (typing && (e.key === "j" || e.key === "k")) return;
+      // Allow arrows/enter outside inputs; for Enter only when not typing
+      if (typing && e.key === "Enter") return;
+      if (viewerState.visible) return;
+
+      const currentIdx = activeBlockKey ? blockKeys.indexOf(activeBlockKey) : -1;
+
+      if (e.key === "ArrowDown" || (!typing && e.key === "j")) {
+        e.preventDefault();
+        const next = Math.min(blockKeys.length - 1, currentIdx + 1);
+        const key = blockKeys[next < 0 ? 0 : next];
+        setActiveBlockKey(key);
+        const flatIdx = flatItems.findIndex((i) => i.key === key);
+        if (flatIdx >= 0) rowVirtualizer.scrollToIndex(flatIdx, { align: "auto" });
+        return;
+      }
+      if (e.key === "ArrowUp" || (!typing && e.key === "k")) {
+        e.preventDefault();
+        const next = Math.max(0, currentIdx <= 0 ? 0 : currentIdx - 1);
+        const key = blockKeys[next];
+        setActiveBlockKey(key);
+        const flatIdx = flatItems.findIndex((i) => i.key === key);
+        if (flatIdx >= 0) rowVirtualizer.scrollToIndex(flatIdx, { align: "auto" });
+        return;
+      }
+      if (e.key === "Enter" && activeBlockKey) {
+        const item = flatItems.find((i) => i.key === activeBlockKey);
+        if (item && item.type === "block") {
+          e.preventDefault();
+          setViewerState({
+            visible: true,
+            filePath: item.filePath,
+            initialLine: item.block.start_line,
+          });
+        }
+      }
+    };
+
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [
+    flatItems,
+    activeBlockKey,
+    viewerState.visible,
+    isSkippedModalOpen,
+    secondaryFilter,
+    rowVirtualizer,
+  ]);
 
   const totalMatchedBlocks = useMemo(() => {
     return fileGroups.reduce((acc, g) => acc + g.blocks.length, 0);
@@ -1171,7 +1269,10 @@ const App: React.FC = () => {
                         transform: `translateY(${virtualItem.start}px)`,
                       }}
                     >
-                      <div className="match-block">
+                      <div
+                        className={`match-block ${activeBlockKey === item.key ? "match-block--active" : ""}`}
+                        onClick={() => setActiveBlockKey(item.key)}
+                      >
                         <div className="block-header">
                           <span className="block-line-range">
                             第 {item.block.start_line} - {item.block.end_line} 行

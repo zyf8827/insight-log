@@ -717,3 +717,10 @@ body {
 [data-theme="dark"] .cm-log-warn { color: #fbbf24; }
 [data-theme="dark"] .cm-log-info { color: #38bdf8; }
 [data-theme="dark"] .cm-log-debug { color: #94a3b8; }
+
+
+.match-block--active {
+  outline: 2px solid var(--primary-color);
+  outline-offset: -2px;
+  border-radius: 6px;
+}
