@@ -1,6 +1,7 @@
 import React, { useState, useMemo, useRef, useEffect, useCallback } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
+import { revealItemInDir } from "@tauri-apps/plugin-opener";
 import {
   Button,
   Input,
@@ -38,7 +39,8 @@ import {
   LinkOutlined,
   BulbOutlined,
   MoonOutlined,
-  DesktopOutlined
+  DesktopOutlined,
+  FolderViewOutlined,
 } from "@ant-design/icons";
 import { useVirtualizer } from "@tanstack/react-virtual";
 
@@ -220,6 +222,14 @@ function resolveTheme(mode: ThemeMode): "light" | "dark" {
       : "light";
   }
   return mode;
+}
+
+
+function resolveRevealPath(filePath: string): string {
+  if (filePath.includes(" → ")) {
+    return filePath.split(" → ")[0].trim();
+  }
+  return filePath;
 }
 
 const App: React.FC = () => {
@@ -546,6 +556,15 @@ const App: React.FC = () => {
       message.info("正在停止搜索…");
     } catch (err) {
       message.error(`停止失败: ${err}`);
+    }
+  }, []);
+
+  const handleRevealInFolder = useCallback(async (filePath: string) => {
+    const target = resolveRevealPath(filePath);
+    try {
+      await revealItemInDir(target);
+    } catch (err) {
+      message.error(`无法在系统文件夹中显示: ${err}`);
     }
   }, []);
 
@@ -1230,6 +1249,19 @@ const App: React.FC = () => {
                                 }}
                               >
                                 复制路径
+                              </Button>
+                            </Tooltip>
+                            <Tooltip title="在系统文件夹中显示（归档则定位母包）">
+                              <Button
+                                type="text"
+                                size="small"
+                                icon={<FolderViewOutlined />}
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  void handleRevealInFolder(item.filePath);
+                                }}
+                              >
+                                显示
                               </Button>
                             </Tooltip>
                             <Tooltip title="在完整查看器中浏览此文件">
